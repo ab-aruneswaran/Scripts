@@ -1,10 +1,13 @@
 USE [DBADB]
 GO
-/****** Object:  StoredProcedure [dbo].[SQLhealthcheck_report_new1]    Script Date: 12/23/2025 11:12:54 AM ******/
+
+/****** Object:  StoredProcedure [dbo].[SQLhealthcheck_report_new2]    Script Date: 1/5/2026 4:55:14 PM ******/
 SET ANSI_NULLS ON
 GO
+
 SET QUOTED_IDENTIFIER ON
 GO
+
 
 
  
@@ -14,27 +17,29 @@ GO
 -- Tested: SQL Server 2008 R2, 2012, 2014, 2016, 2017, 2019 and 2022  
 -- Report Type: HTML Report Delivers to Mail Box  
 -- Parameters: DBMail Profile Name *, Email ID *, Server Name (Optional);   
--- Reports: SQL Server Instance Details  
---   Last 4 days Critical Errors from ErrorLog  
---   Instance Last Recycle Information  
---   Tempdb File Usage  
---             Free Disk Space Report
---   CPU Usage  
---   Memory Usage  
---   Performance Counters Data  
---   Missing Backup Report  
---   Connection Information  
---   Log Space Usage Report  
---   Job Status Report  
---   Blocking Report  
---   Long running Transactions
+-- Reports: SQL Server Instance Details
+--   AG Status
+--   Log Shipping 
+--	 Mirroring DB 
+--   Instance Last Recycle Information 
+--   CPU Usage 
+--   PLE Usage
+--   Disk Space Usage
+--   Tempdb File Usage
+--   User DB File Usage
+--   Backup Report for User DB 
+--   Wait Statistics Report
 --   Failed Jobs in Last 24Hrs
+--   Long Running Queries Summary
+--	 Blocked Queries Summary
+
 /**************************/  
 /**************************/  
-CREATE   PROCEDURE [dbo].[SQLhealthcheck_report_new1] (  
-  @MailProfile NVARCHAR(200),   
+CREATE   PROCEDURE [dbo].[SQLhealthcheck_report_new2] (  
+  @MailProfile NVARCHAR(50),   
   @MailID NVARCHAR(2000),  
-  @Server VARCHAR(max) = NULL)  
+  @Server VARCHAR(max) = NULL,
+  @ClientName VARCHAR(max) = NULL)
 AS  
 BEGIN  
 SET NOCOUNT ON;  
@@ -42,81 +47,53 @@ SET ARITHABORT ON;
   
 DECLARE @ServerName VARCHAR(max);  
 SET @ServerName = ISNULL(@Server,@@SERVERNAME);  
-  
-/*********************/  
-/****** Server Reboot Details ********/  
-/*********************/  
-  
-CREATE TABLE #RebootDetails                                
-(                                
- LastRecycle datetime,                                
- CurrentDate datetime,                                
- UpTimeInDays varchar(100)                          
-)                        
-Insert into #RebootDetails          
-SELECT sqlserver_start_time 'Last Recycle',GetDate() 'Current Date', DATEDIFF(DD, sqlserver_start_time,GETDATE())'Up Time in Days'  
-FROM sys.dm_os_sys_info;  
-  
-/*********************/  
-/****** Errors audit for last 4 Days *****/  
-/*********************/  
- 
+    
+/*********************/
+/****** Server Reboot Details ********/
+/*********************/
 
-IF OBJECT_ID('tempdb..#ErrorLogInfo') IS NOT NULL
-    DROP TABLE #ErrorLogInfo;
+IF OBJECT_ID('tempdb..#RebootDetails') IS NOT NULL
+    DROP TABLE #RebootDetails;
 
-CREATE TABLE #ErrorLogInfo
+CREATE TABLE #RebootDetails
 (
-    LogDate     DATETIME,
-    ProcessInfo VARCHAR(50),
-    LogText     VARCHAR(4000)
+    ServiceName     VARCHAR(100),
+    ServiceStatus   VARCHAR(50),
+    RestartTime     VARCHAR(25),
+    CurrentTime     VARCHAR(25),
+    UpTimeInDays    INT
 );
 
-DECLARE @StartDate DATETIME = DATEADD(HOUR, -24, GETDATE());
-DECLARE @EndDate   DATETIME = GETDATE();
-
-INSERT INTO #ErrorLogInfo
-EXEC xp_readerrorlog
-    0,          -- Current error log
-    1,          -- SQL Server error log
-    NULL,       -- No filter
-    NULL,       -- No filter
-    @StartDate,
-    @EndDate,
-    'DESC';
-
-CREATE NONCLUSTERED INDEX IX_ErrorLogInfo
-ON #ErrorLogInfo (LogDate)
-INCLUDE (LogText);
-
-IF OBJECT_ID('tempdb..#ErrorLogSummary') IS NOT NULL
-    DROP TABLE #ErrorLogSummary;
-
-CREATE TABLE #ErrorLogSummary
+;WITH AgentStartTime AS
 (
-    ErrorMessage     VARCHAR(500),
-    ErrorCount       INT,
-    FirstOccurrence  DATETIME,
-    LastOccurrence   DATETIME
-);
-INSERT INTO #ErrorLogSummary
-(
-    ErrorMessage,
-    ErrorCount,
-    FirstOccurrence,
-    LastOccurrence
+    SELECT MAX(agent_start_date) AS AgentLastStartTime
+    FROM msdb.dbo.syssessions
 )
+INSERT INTO #RebootDetails
+SELECT  
+    s.servicename,
+    s.status_desc,
+    FORMAT(s.last_startup_time, 'yyyy-MM-dd hh:mmtt') AS RestartTime,
+    FORMAT(GETDATE(), 'yyyy-MM-dd hh:mmtt')           AS CurrentTime,
+    DATEDIFF(DAY, s.last_startup_time, GETDATE())     AS UpTimeInDays
+FROM sys.dm_server_services s
+WHERE s.servicename LIKE '%SQL Server (%'
+
+UNION ALL
+
 SELECT
-    LEFT(LogText, 500) AS ErrorMessage,
-    COUNT(*) AS ErrorCount,
-    MIN(LogDate) AS FirstOccurrence,
-    MAX(LogDate) AS LastOccurrence
-FROM #ErrorLogInfo
-GROUP BY LEFT(LogText, 500);
+    s.servicename,
+    s.status_desc,
+    FORMAT(ast.AgentLastStartTime, 'yyyy-MM-dd hh:mmtt') AS RestartTime,
+    FORMAT(GETDATE(), 'yyyy-MM-dd hh:mmtt')              AS CurrentTime,
+    CASE 
+        WHEN ast.AgentLastStartTime IS NULL THEN NULL
+        ELSE DATEDIFF(DAY, ast.AgentLastStartTime, GETDATE())
+    END AS UpTimeInDays
+FROM sys.dm_server_services s
+CROSS JOIN AgentStartTime ast
+WHERE s.servicename LIKE '%SQL Server Agent%';
 
-
-
-  
 /*********************/  
 /***** Windows Disk Space Details ******/  
 /*********************/  
@@ -161,376 +138,96 @@ select rtrim(ltrim(SUBSTRING(line,1,CHARINDEX('|',line) -1))) as drivename
 from #output where line like '[A-Z][:]%'
 order by drivename
 
--- Optional: Print header and preview result
-
-  
-/*********************/  
-/***** SQL Server CPU Usage Details ******/  
-/*********************/  
 /*********************/
 /***** SQL Server CPU Usage Summary (Last 24 Hours) ******/
 /*********************/
+IF OBJECT_ID('tempdb..#CPU') IS NOT NULL
+    DROP TABLE #CPU;
+
 CREATE TABLE #CPU
 (
-    servername      VARCHAR(50),
-    Max_Total_CPU   VARCHAR(50),
-    Min_Total_CPU   VARCHAR(50),
-    Avg_Total_CPU   VARCHAR(50),
-    load_date       VARCHAR(50)
+    servername         SYSNAME,
+    Max_Total_CPU      INT,
+    Min_Total_CPU      INT,
+    Avg_Total_CPU      INT,
+    Max_CPU_Hit_Count  INT,
+    load_date          DATETIME
 );
-     
-  
+
+;WITH CPUStats AS
+(
+    SELECT
+        SQLUtilisedCPU + Otherprosses AS TotalCPU
+    FROM DBADB.dbo.CPUUtilisationdata
+    WHERE Time >= DATEADD(HOUR, -24, GETDATE())
+),
+MaxCPU AS
+(
+    SELECT MAX(TotalCPU) AS MaxCPUValue
+    FROM CPUStats
+)
 INSERT INTO #CPU
 (
     servername,
     Max_Total_CPU,
     Min_Total_CPU,
     Avg_Total_CPU,
+    Max_CPU_Hit_Count,
     load_date
 )
 SELECT
-    @@SERVERNAME,
-    MAX(SQLUtilisedCPU + Otherprosses),
-    MIN(SQLUtilisedCPU + Otherprosses),
-    AVG(SQLUtilisedCPU + Otherprosses),
-    GETDATE()
-FROM DBADB.dbo.CPUUtilisationdata
-WHERE Time >= DATEADD(HOUR, -24, GETDATE());
+    @@SERVERNAME                                    AS servername,
+    MAX(cs.TotalCPU)                               AS Max_Total_CPU,
+    MIN(cs.TotalCPU)                               AS Min_Total_CPU,
+    AVG(cs.TotalCPU)                               AS Avg_Total_CPU,
+    SUM(CASE WHEN cs.TotalCPU = m.MaxCPUValue 
+             THEN 1 ELSE 0 END)                    AS Max_CPU_Hit_Count,
+    GETDATE()                                      AS load_date
+FROM CPUStats cs
+CROSS JOIN MaxCPU m;
+
+
 
 /*********************/  
 /***** SQL Server Memory Usage Details *****/  
 /*********************/  
-  
-CREATE TABLE #Memory_BPool (  
-BPool_Committed_MB VARCHAR(50),  
-BPool_Commit_Tgt_MB VARCHAR(50),  
-BPool_Visible_MB VARCHAR(50));  
-  
--- SQL server 2008 / 2008 R2  
-/**  
--- SQL server 2012 / 2014 / 2016  
-INSERT INTO #Memory_BPool   
-SELECT  
-      (committed_kb)/1024.0 as BPool_Committed_MB,  
-      (committed_target_kb)/1024.0 as BPool_Commit_Tgt_MB,  
-      (visible_target_kb)/1024.0 as BPool_Visible_MB  
-FROM  sys.dm_os_sys_info;  
-**/  
-CREATE TABLE #Memory_sys (  
-total_physical_memory_mb VARCHAR(50),  
-available_physical_memory_mb VARCHAR(50),  
-total_page_file_mb VARCHAR(50),  
-available_page_file_mb VARCHAR(50),  
-Percentage_Used VARCHAR(50),  
-system_memory_state_desc VARCHAR(50));  
-  
-INSERT INTO #Memory_sys  
-select  
-      total_physical_memory_kb/1024 AS total_physical_memory_mb,  
-      available_physical_memory_kb/1024 AS available_physical_memory_mb,  
-      total_page_file_kb/1024 AS total_page_file_mb,  
-      available_page_file_kb/1024 AS available_page_file_mb,  
-      100 - (100 * CAST(available_physical_memory_kb AS DECIMAL(18,3))/CAST(total_physical_memory_kb AS DECIMAL(18,3)))   
-      AS 'Percentage_Used',  
-      system_memory_state_desc  
-from  sys.dm_os_sys_memory;  
-  
-  
-CREATE TABLE #Memory_process(  
-physical_memory_in_use_GB VARCHAR(50),  
-locked_page_allocations_GB VARCHAR(50),  
-virtual_address_space_committed_GB VARCHAR(50),  
-available_commit_limit_GB VARCHAR(50),  
-page_fault_count VARCHAR(50))  
-  
-INSERT INTO #Memory_process  
-select  
-      physical_memory_in_use_kb/1048576.0 AS 'physical_memory_in_use(GB)',  
-      locked_page_allocations_kb/1048576.0 AS 'locked_page_allocations(GB)',  
-      virtual_address_space_committed_kb/1048576.0 AS 'virtual_address_space_committed(GB)',  
-      available_commit_limit_kb/1048576.0 AS 'available_commit_limit(GB)',  
-      page_fault_count as 'page_fault_count'  
-from  sys.dm_os_process_memory;  
-  
-  
-CREATE TABLE #Memory(  
-Parameter VARCHAR(200),  
-Value VARCHAR(100));  
-  
-INSERT INTO #Memory   
-SELECT 'BPool_Committed_MB',BPool_Committed_MB FROM #Memory_BPool  
-UNION  
-SELECT 'BPool_Commit_Tgt_MB', BPool_Commit_Tgt_MB FROM #Memory_BPool  
-UNION   
-SELECT 'BPool_Visible_MB', BPool_Visible_MB FROM #Memory_BPool  
-UNION  
-SELECT 'total_physical_memory_mb',total_physical_memory_mb FROM #Memory_sys  
-UNION  
-SELECT 'available_physical_memory_mb',available_physical_memory_mb FROM #Memory_sys  
-UNION  
-SELECT 'total_page_file_mb',total_page_file_mb FROM #Memory_sys  
-UNION  
-SELECT 'available_page_file_mb',available_page_file_mb FROM #Memory_sys  
-UNION  
-SELECT 'Percentage_Used',Percentage_Used FROM #Memory_sys  
-UNION  
-SELECT 'system_memory_state_desc',system_memory_state_desc FROM #Memory_sys  
-UNION  
-SELECT 'physical_memory_in_use_GB',physical_memory_in_use_GB FROM #Memory_process  
-UNION  
-SELECT 'locked_page_allocations_GB',locked_page_allocations_GB FROM #Memory_process  
-UNION  
-SELECT 'virtual_address_space_committed_GB',virtual_address_space_committed_GB FROM #Memory_process  
-UNION  
-SELECT 'available_commit_limit_GB',available_commit_limit_GB FROM #Memory_process  
-UNION  
-SELECT 'page_fault_count',page_fault_count FROM #Memory_process;  
+IF OBJECT_ID('tempdb..#PLE') IS NOT NULL
+    DROP TABLE #PLE;
 
-  
-/**********************/  
-/***** Performance Counter Details ********/  
-/**********************/  
-  
-CREATE TABLE #PerfCntr_Data(  
-Parameter VARCHAR(300),  
-Value VARCHAR(100));  
-  
--- Get size of SQL Server Page in bytes  
-DECLARE @pg_size INT, @Instancename varchar(max)  
-SELECT @pg_size = low from master..spt_values where number = 1 and type = 'E'  
-  
--- Extract perfmon counters to a temporary table  
-IF OBJECT_ID('tempdb..#perfmon_counters') is not null DROP TABLE #perfmon_counters  
-SELECT * INTO #perfmon_counters FROM sys.dm_os_performance_counters;  
-  
--- Get SQL Server instance name as it require for capturing Buffer Cache hit Ratio  
-SELECT  @Instancename = LEFT([object_name], (CHARINDEX(':',[object_name])))   
-FROM    #perfmon_counters   
-WHERE   counter_name = 'Buffer cache hit ratio';  
-  
-INSERT INTO #PerfCntr_Data  
-SELECT CONVERT(VARCHAR(300),Cntr) AS Parameter, CONVERT(VARCHAR(100),Value) AS Value  
-FROM  
-(  
-SELECT  'Total Server Memory (GB)' as Cntr,  
-        (cntr_value/1048576.0) AS Value   
-FROM    #perfmon_counters   
-WHERE   counter_name = 'Total Server Memory (KB)'  
-UNION ALL  
-SELECT  'Target Server Memory (GB)',   
-        (cntr_value/1048576.0)   
-FROM    #perfmon_counters   
-WHERE   counter_name = 'Target Server Memory (KB)'  
-UNION ALL  
-SELECT  'Connection Memory (MB)',   
-        (cntr_value/1024.0)   
-FROM    #perfmon_counters   
-WHERE   counter_name = 'Connection Memory (KB)'  
-UNION ALL  
-SELECT  'Lock Memory (MB)',   
-        (cntr_value/1024.0)   
-FROM    #perfmon_counters   
-WHERE   counter_name = 'Lock Memory (KB)'  
-UNION ALL  
-SELECT  'SQL Cache Memory (MB)',   
-        (cntr_value/1024.0)   
-FROM    #perfmon_counters   
-WHERE   counter_name = 'SQL Cache Memory (KB)'  
-UNION ALL  
-SELECT  'Optimizer Memory (MB)',   
-        (cntr_value/1024.0)   
-FROM    #perfmon_counters   
-WHERE   counter_name = 'Optimizer Memory (KB) '  
-UNION ALL  
-SELECT  'Granted Workspace Memory (MB)',   
-        (cntr_value/1024.0)   
-FROM    #perfmon_counters   
-WHERE   counter_name = 'Granted Workspace Memory (KB) '  
-UNION ALL  
-SELECT  'Cursor memory usage (MB)',   
-        (cntr_value/1024.0)   
-FROM    #perfmon_counters   
-WHERE   counter_name = 'Cursor memory usage' and instance_name = '_Total'  
-UNION ALL  
-SELECT  'Total pages Size (MB)',   
-        (cntr_value*@pg_size)/1048576.0   
-FROM    #perfmon_counters   
-WHERE   object_name= @Instancename+'Buffer Manager'   
-        and counter_name = 'Total pages'  
-UNION ALL  
-SELECT  'Database pages (MB)',   
-        (cntr_value*@pg_size)/1048576.0   
-FROM    #perfmon_counters   
-WHERE   object_name = @Instancename+'Buffer Manager' and counter_name = 'Database pages'  
-UNION ALL  
-SELECT  'Free pages (MB)',   
-        (cntr_value*@pg_size)/1048576.0   
-FROM    #perfmon_counters   
-WHERE   object_name = @Instancename+'Buffer Manager'   
-        and counter_name = 'Free pages'  
-UNION ALL  
-SELECT  'Reserved pages (MB)',   
-        (cntr_value*@pg_size)/1048576.0   
-FROM    #perfmon_counters   
-WHERE   object_name=@Instancename+'Buffer Manager'   
-        and counter_name = 'Reserved pages'  
-UNION ALL  
-SELECT  'Stolen pages (MB)',   
-        (cntr_value*@pg_size)/1048576.0   
-FROM    #perfmon_counters   
-WHERE   object_name=@Instancename+'Buffer Manager'   
-        and counter_name = 'Stolen pages'  
-UNION ALL  
-SELECT  'Cache Pages (MB)',   
-        (cntr_value*@pg_size)/1048576.0   
-FROM    #perfmon_counters   
-WHERE   object_name=@Instancename+'Plan Cache'   
-        and counter_name = 'Cache Pages' and instance_name = '_Total'  
-UNION ALL  
-SELECT  'Page Life Expectency in seconds',  
-        cntr_value   
-FROM    #perfmon_counters   
-WHERE   object_name=@Instancename+'Buffer Manager'   
-        and counter_name = 'Page life expectancy'  
-UNION ALL  
-SELECT  'Free list stalls/sec',  
-        cntr_value   
-FROM    #perfmon_counters   
-WHERE   object_name=@Instancename+'Buffer Manager'   
-        and counter_name = 'Free list stalls/sec'  
-UNION ALL  
-SELECT  'Checkpoint pages/sec',  
-        cntr_value   
-FROM    #perfmon_counters   
-WHERE   object_name=@Instancename+'Buffer Manager'   
-        and counter_name = 'Checkpoint pages/sec'  
-UNION ALL  
-SELECT  'Lazy writes/sec',  
-        cntr_value   
-FROM    #perfmon_counters   
-WHERE   object_name=@Instancename+'Buffer Manager'   
-        and counter_name = 'Lazy writes/sec'  
-UNION ALL  
-SELECT  'Memory Grants Pending',  
-        cntr_value   
-FROM    #perfmon_counters   
-WHERE   object_name=@Instancename+'Memory Manager'   
-        and counter_name = 'Memory Grants Pending'  
-UNION ALL  
-SELECT  'Memory Grants Outstanding',  
-        cntr_value   
-FROM    #perfmon_counters   
-WHERE   object_name=@Instancename+'Memory Manager'   
-        and counter_name = 'Memory Grants Outstanding'  
-UNION ALL  
-SELECT  'process_physical_memory_low',  
-        process_physical_memory_low   
-FROM    sys.dm_os_process_memory WITH (NOLOCK)  
-UNION ALL  
-SELECT  'process_virtual_memory_low',  
-        process_virtual_memory_low   
-FROM    sys.dm_os_process_memory WITH (NOLOCK)  
-UNION ALL  
-SELECT  'Max_Server_Memory (MB)' ,  
-        [value_in_use]   
-FROM    sys.configurations   
-WHERE   [name] = 'max server memory (MB)'  
-UNION ALL  
-SELECT  'Min_Server_Memory (MB)' ,  
-        [value_in_use]   
-FROM    sys.configurations   
-WHERE   [name] = 'min server memory (MB)'  
-UNION ALL  
-SELECT  'BufferCacheHitRatio',  
-        (a.cntr_value * 1.0 / b.cntr_value) * 100.0   
-FROM    sys.dm_os_performance_counters a  
-        JOIN (SELECT cntr_value,OBJECT_NAME FROM sys.dm_os_performance_counters  
-              WHERE counter_name = 'Buffer cache hit ratio base' AND   
-                    OBJECT_NAME = @Instancename+'Buffer Manager') b ON   
-                    a.OBJECT_NAME = b.OBJECT_NAME WHERE a.counter_name = 'Buffer cache hit ratio'   
-                    AND a.OBJECT_NAME = @Instancename+'Buffer Manager') AS P;  
-  
-  
-/****************************************************
- Combined Backup Status Report (NO DATE CONDITION)
-****************************************************/
-
-IF OBJECT_ID('tempdb..#Backup_Report') IS NOT NULL
-    DROP TABLE #Backup_Report;
-
-CREATE TABLE #Backup_Report
+CREATE TABLE #PLE
 (
-    DatabaseName           SYSNAME,
-
-    LastFullBackupTime     DATETIME,
-    FullBackupSize_GB      DECIMAL(18,2),
-
-    LastDiffBackupTime     DATETIME,
-    DiffBackupSize_GB      DECIMAL(18,2),
-
-    LastLogBackupTime      DATETIME,
-    LogBackupSize_GB       DECIMAL(18,2)
+    ServerName                 SYSNAME,
+    MinPLE                     BIGINT,
+    MaxPLE                     BIGINT,
+    AvgPLE                     DECIMAL(18,2),
+    PLE_Less_Than_300_Count    INT,
+    LoadDate                   DATETIME
 );
 
-;WITH BackupCTE AS
+;WITH PLEData AS
 (
-    SELECT
-        bs.database_name,
-        bs.type,
-        bs.backup_finish_date,
-        CAST(bs.compressed_backup_size / 1024.0 / 1024.0 / 1024.0 AS DECIMAL(18,2)) AS BackupSize_GB,
-        ROW_NUMBER() OVER
-        (
-            PARTITION BY bs.database_name, bs.type
-            ORDER BY bs.backup_finish_date DESC
-        ) AS rn
-    FROM msdb.dbo.backupset bs
-    INNER JOIN msdb.dbo.backupmediaset bms
-        ON bs.media_set_id = bms.media_set_id
+    SELECT 
+        CAST(PageLifeExpectancy AS BIGINT) AS PLE
+    FROM DBADB.dbo.PageLifeExpectancyLog
+    WHERE LoggedAt >= DATEADD(HOUR, -24, GETDATE())
 )
-INSERT INTO #Backup_Report
+INSERT INTO #PLE
 (
-    DatabaseName,
-    LastFullBackupTime,
-    FullBackupSize_GB,
-    LastDiffBackupTime,
-    DiffBackupSize_GB,
-    LastLogBackupTime,
-    LogBackupSize_GB
+    servername,
+    MinPLE,
+    MaxPLE,
+    AvgPLE,
+    PLE_Less_Than_300_Count,
+    LoadDate
 )
 SELECT
-    d.name AS DatabaseName,
-
-    fb.backup_finish_date AS LastFullBackupTime,
-    fb.BackupSize_GB      AS FullBackupSize_GB,
-
-    db.backup_finish_date AS LastDiffBackupTime,
-    db.BackupSize_GB      AS DiffBackupSize_GB,
-
-    lb.backup_finish_date AS LastLogBackupTime,
-    lb.BackupSize_GB      AS LogBackupSize_GB
-
-FROM sys.databases d
-LEFT JOIN BackupCTE fb
-    ON d.name = fb.database_name
-   AND fb.type = 'D'
-   AND fb.rn = 1
-
-LEFT JOIN BackupCTE db
-    ON d.name = db.database_name
-   AND db.type = 'I'
-   AND db.rn = 1
-
-LEFT JOIN BackupCTE lb
-    ON d.name = lb.database_name
-   AND lb.type = 'L'
-   AND lb.rn = 1
-
-WHERE d.database_id > 4
-ORDER BY d.name;
-
--- View result
---SELECT * FROM #Backup_Report;
+    @@SERVERNAME                                       AS ServerName,
+    MIN(PLE)                                          AS MinPLE,
+    MAX(PLE)                                          AS MaxPLE,
+    AVG(PLE)                                    AS AvgPLE,
+    SUM(CASE WHEN PLE < 300 THEN 1 ELSE 0 END)        AS PLE_Less_Than_300_Count,
+    GETDATE()                                         AS LoadDate
+FROM PLEData;
 
 /****************************************************
  AG Status Report
@@ -729,121 +426,95 @@ Mirroring Report
 --    ON dm.database_id = d.database_id
 --WHERE dm.mirroring_guid IS NOT NULL;
 
-
-/*********************/  
-/****** Failed Jobs in Last 24Hrs ********/  
-/*********************/
- 
-create table #Failed_jobs(date_time varchar(100),
-job_name varchar(200),
-job_step varchar(10),
-error_message varchar(max))
- 
-insert into #Failed_jobs
-SELECT MSDB.dbo.agent_datetime(jh.run_date,jh.run_time) as date_time
-,j.name as job_name,js.step_id as job_step,jh.message as error_message
-FROM msdb.dbo.sysjobs AS j
-INNER JOIN msdb.dbo.sysjobsteps AS js ON js.job_id = j.job_id
-INNER JOIN msdb.dbo.sysjobhistory AS jh ON jh.job_id = j.job_id AND jh.step_id = js.step_id
-WHERE jh.run_status = 0 AND MSDB.dbo.agent_datetime(jh.run_date,jh.run_time) >= GETDATE()-1 and j.[name] <> 'geomon_test'
-ORDER BY MSDB.dbo.agent_datetime(jh.run_date,jh.run_time) DESC
-  
-
-/*********************/  
-/***** Currently Running Jobs Info *******/  
-/*********************/  
-Create table #JobInfo(               
-spid varchar(10),                           
-lastwaittype varchar(100),                           
-dbname varchar(100),                           
-login_time varchar(100),                           
-status varchar(100),                           
-opentran varchar(100),                           
-hostname varchar(100),                          
-JobName varchar(100),                          
-command nvarchar(2000),  
-domain varchar(100),   
-loginname varchar(100)     
-)   
-insert into #JobInfo  
-SELECT  distinct p.spid,p.lastwaittype,DB_NAME(p.dbid),p.login_time,p.status,p.open_tran,p.hostname,J.name,  
-p.cmd,p.nt_domain,p.loginame  
-FROM master..sysprocesses p  
-INNER JOIN msdb..sysjobs j ON   
-substring(left(j.job_id,8),7,2) + substring(left(j.job_id,8),5,2) + substring(left(j.job_id,8),3,2) + substring(left(j.job_id,8),1,2) = substring(p.program_name, 32, 8)   
-Inner join msdb..sysjobactivity sj on j.job_id=sj.job_id  
-WHERE program_name like'SQLAgent - TSQL JobStep (Job %' and sj.stop_execution_date is null  
-
 /*********************/  
 /****** Tempdb File Info *********/  
 /*********************/  
 -- tempdb file usage  
-Create table #tempdbfileusage(               
-servername varchar(max),                           
-databasename varchar(max),                           
-filename varchar(max),
-physicalName varchar(max),                           
-filesizeGB varchar(max),                           
-availableSpaceGB varchar(max),                           
-percentfull varchar(max)   
-)   
-  
-DECLARE @TEMPDBSQL NVARCHAR(4000);
+IF OBJECT_ID('tempdb..#tempdbfileusage') IS NOT NULL
+    DROP TABLE #tempdbfileusage;
+
+CREATE TABLE #tempdbfileusage
+(
+    servername        VARCHAR(MAX),
+    databasename      VARCHAR(MAX),
+    filename          VARCHAR(MAX),
+    physicalName      VARCHAR(MAX),
+    filesizeGB        DECIMAL(18,2),
+    availableSpaceGB  DECIMAL(18,2),
+    percentfull       DECIMAL(5,2),
+    diskTotalGB       DECIMAL(18,2),
+    diskFreeGB        DECIMAL(18,2),
+    AutoGrowth        VARCHAR(10),
+    AutoGrowthSetting VARCHAR(20),
+    MaxSize           VARCHAR(20)
+);
+
+DECLARE @TEMPDBSQL NVARCHAR(MAX);
 
 SET @TEMPDBSQL = '
-USE tempdb;
-
+Use tempdb
 SELECT
-    CONVERT(VARCHAR(MAX), @@SERVERNAME) AS server_name,
-    db.name AS database_name,
-    mf.name AS file_logical_name,
-    mf.filename AS file_physical_name,
+    @@SERVERNAME AS servername,
+    ''tempdb'' AS databasename,
+    mf.name AS filename,
+    mf.physical_name AS physicalName,
 
-    -- Total File Size in GB
-    CAST(mf.size / 128.0 / 1024 AS DECIMAL(18,2)) AS file_size_gb,
+    CAST(mf.size * 8.0 / 1024 / 1024 AS DECIMAL(18,2)) AS filesizeGB,
+    CAST((mf.size - FILEPROPERTY(mf.name, ''SpaceUsed'')) * 8.0 / 1024 / 1024 AS DECIMAL(18,2)) AS availableSpaceGB,
+    CAST(FILEPROPERTY(mf.name, ''SpaceUsed'') * 100.0 / mf.size AS DECIMAL(5,2)) AS percentfull,
+    CAST(vs.total_bytes / 1024.0 / 1024 / 1024 AS DECIMAL(18,2)) AS diskTotalGB,
+    CAST(vs.available_bytes / 1024.0 / 1024 / 1024 AS DECIMAL(18,2)) AS diskFreeGB,
 
-    -- Available Space in GB
-    CAST(
-        (mf.size / 128.0 - CAST(FILEPROPERTY(mf.name, ''SpaceUsed'') AS INT) / 128.0)
-        / 1024
-        AS DECIMAL(18,2)
-    ) AS available_space_gb,
+    CASE 
+        WHEN mf.growth = 0 THEN ''OFF''
+        ELSE ''ON''
+    END AS AutoGrowth,
 
-    -- Percent Full
-    CAST(
-        (CAST(FILEPROPERTY(mf.name, ''SpaceUsed'') AS FLOAT) / mf.size) * 100
-        AS DECIMAL(5,2)
-    ) AS percent_full
+   CASE 
+    WHEN mf.is_percent_growth = 1 
+        THEN CAST(mf.growth AS VARCHAR(10)) + ''%''
+    ELSE FORMAT(mf.growth * 8 / 1024.0, ''N0'') + '' MB''
+END AS AutoGrowthSetting,
 
-FROM tempdb.dbo.sysfiles mf
-JOIN master..sysdatabases db
-    ON db.dbid = DB_ID();
+CASE 
+    WHEN mf.max_size = -1 THEN ''UNLIMITED''
+    ELSE FORMAT(mf.max_size * 8.0 / 1024 / 1024, ''N2'') + '' GB''
+END AS MaxSize
+
+
+FROM tempdb.sys.database_files mf
+CROSS APPLY sys.dm_os_volume_stats(DB_ID(''tempdb''), mf.file_id) vs;
 ';
 
--- Insert data
+-- Insert data into temp table
 INSERT INTO #tempdbfileusage
 EXEC sp_executesql @TEMPDBSQL;
+
 
 /*********************/  
 /****** User DB File Info *********/  
 /*********************/  
--- usr db file usage  
+IF OBJECT_ID('tempdb..#UserDBFileUsage') IS NOT NULL
+    DROP TABLE #UserDBFileUsage;
 
 CREATE TABLE #UserDBFileUsage
 (
-    servername        VARCHAR(128),
-    databasename      VARCHAR(MAX), 
+    servername        VARCHAR(MAX),
+    databasename      VARCHAR(MAX),
     filename          VARCHAR(MAX),
-    Type              VARCHAR(MAX),
+    filetype          VARCHAR(10),
     physicalName      VARCHAR(MAX),
-    filesizeGB        VARCHAR(MAX),
-    availableSpaceGB  VARCHAR(MAX),
-    percentfull       VARCHAR(MAX)
+    filesizeGB        DECIMAL(18,2),
+    availableSpaceGB  DECIMAL(18,2),
+    percentfull       DECIMAL(5,2),
+    diskTotalGB       DECIMAL(18,2),
+    diskFreeGB        DECIMAL(18,2),
+    AutoGrowth        VARCHAR(10),
+    AutoGrowthSetting VARCHAR(20),
+    MaxSize           VARCHAR(20)
 );
 
 DECLARE @SQL1 NVARCHAR(MAX) = N'';
-
--- Iterate through each database to build the dynamic SQL
 DECLARE @dbname SYSNAME;
 
 DECLARE db_cursor CURSOR FOR
@@ -857,19 +528,40 @@ FETCH NEXT FROM db_cursor INTO @dbname;
 
 WHILE @@FETCH_STATUS = 0
 BEGIN
-    SET @SQL1 = @SQL1 + '
-    USE ' + QUOTENAME(@dbname) + ';
+    SET @SQL1 += '
+	USE ' + QUOTENAME(@dbname) + ';
     INSERT INTO #UserDBFileUsage
     SELECT
         @@SERVERNAME AS servername,
-        DB_NAME() AS databasename,
+        ''' + @dbname + ''' AS databasename,
         mf.name AS filename,
-        CASE mf.type WHEN 0 THEN ''DATA'' WHEN 1 THEN ''LOG'' END AS FileType,
+        CASE mf.type WHEN 0 THEN ''DATA'' WHEN 1 THEN ''LOG'' END AS filetype,
         mf.physical_name AS physicalName,
-        CAST(mf.size / 128.0 / 1024 AS DECIMAL(18,2)) AS filesizeGB,
-        CAST((mf.size / 128.0 - CAST(FILEPROPERTY(mf.name, ''SpaceUsed'') AS INT) / 128.0) / 1024 AS DECIMAL(18,2)) AS availableSpaceGB,
-        CAST((CAST(FILEPROPERTY(mf.name, ''SpaceUsed'') AS FLOAT) / mf.size) * 100 AS DECIMAL(5,2)) AS percentfull
-    FROM sys.database_files mf;
+
+        CAST(mf.size * 8.0 / 1024 / 1024 AS DECIMAL(18,2)) AS filesizeGB,
+
+        CAST((mf.size - FILEPROPERTY(mf.name, ''SpaceUsed'')) * 8.0 / 1024 / 1024 AS DECIMAL(18,2)) AS availableSpaceGB,
+
+        CAST(FILEPROPERTY(mf.name, ''SpaceUsed'') * 100.0 / mf.size AS DECIMAL(5,2)) AS percentfull,
+
+        CAST(vs.total_bytes / 1024.0 / 1024 / 1024 AS DECIMAL(18,2)) AS diskTotalGB,
+        CAST(vs.available_bytes / 1024.0 / 1024 / 1024 AS DECIMAL(18,2)) AS diskFreeGB,
+
+        CASE WHEN mf.growth = 0 THEN ''OFF'' ELSE ''ON'' END AS AutoGrowth,
+
+        CASE 
+            WHEN mf.is_percent_growth = 1 THEN CAST(mf.growth AS VARCHAR(10)) + ''%''
+            ELSE FORMAT(mf.growth * 8 / 1024.0, ''N0'') + '' MB''
+        END AS AutoGrowthSetting,
+
+        CASE 
+            WHEN mf.max_size = -1 THEN ''UNLIMITED''
+            ELSE FORMAT(mf.max_size * 8.0 / 1024 / 1024, ''N2'') + '' GB''
+        END AS MaxSize
+
+    FROM sys.master_files mf
+    CROSS APPLY sys.dm_os_volume_stats(mf.database_id, mf.file_id) vs
+    WHERE mf.database_id = DB_ID(''' + @dbname + ''');
     ';
 
     FETCH NEXT FROM db_cursor INTO @dbname;
@@ -878,233 +570,364 @@ END
 CLOSE db_cursor;
 DEALLOCATE db_cursor;
 
--- Execute the dynamic SQL
 EXEC sys.sp_executesql @SQL1;
 
-/*********************/  
-/****** Long Running Info *********/  
-/*********************/  
-IF OBJECT_ID('tempdb..#LongRunningQueries') IS NOT NULL
-    DROP TABLE #LongRunningQueries;-- Create a temporary table
-CREATE TABLE #LongRunningQueries
+/****************************************************
+ Combined Backup Status Report (NO DATE CONDITION)
+****************************************************/
+
+IF OBJECT_ID('tempdb..#Backup_Report') IS NOT NULL
+    DROP TABLE #Backup_Report;
+
+CREATE TABLE #Backup_Report
 (
-    StartTime DATETIME,
-    ElapsedTime NVARCHAR(128),
-    SPID INT,
-    UserName NVARCHAR(128),
-    ProgramName NVARCHAR(128),
-    DatabaseName NVARCHAR(128),
-    ExecutingSQL NVARCHAR(MAX),
-    WaitType NVARCHAR(60),
-    StatementText NVARCHAR(MAX),
-    StoredProcedure NVARCHAR(128)
+    DatabaseName           SYSNAME,
+
+    LastFullBackupTime     DATETIME,
+    FullBackupSize_GB      DECIMAL(18,2),
+
+    LastDiffBackupTime     DATETIME,
+    DiffBackupSize_GB      DECIMAL(18,2),
+
+    LastLogBackupTime      DATETIME,
+    LogBackupSize_MB       DECIMAL(18,2)
 );
 
--- Insert the query results into the temp table
-WITH CTE AS
+;WITH BackupCTE AS
 (
-    SELECT *,
-           ROW_NUMBER() OVER
-           (
-               PARTITION BY SPID, DatabaseName, ISNULL(StatementText, ExecutingSQL)
-               ORDER BY logdate DESC
-           ) AS rn
-    FROM [DBADB].[dbo].[longqrydetails]
-    WHERE logdate >= DATEADD(HOUR, -24, GETDATE())
+    SELECT
+        bs.database_name,
+        bs.type,
+        bs.backup_finish_date,
+        CAST(bs.compressed_backup_size / 1024.0 / 1024.0 / 1024.0 AS DECIMAL(18,2)) AS BackupSize_GB,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY bs.database_name, bs.type
+            ORDER BY bs.backup_finish_date DESC
+        ) AS rn
+    FROM msdb.dbo.backupset bs
+    INNER JOIN msdb.dbo.backupmediaset bms
+        ON bs.media_set_id = bms.media_set_id
 )
-, MaxElapsed AS
+INSERT INTO #Backup_Report
 (
-    SELECT 
-        SPID,
-        DatabaseName,
-        ISNULL(StatementText, ExecutingSQL) AS QueryText,
-        MAX(ElapsedTime) AS MaxElapsedTime
-    FROM CTE
-    GROUP BY SPID, DatabaseName, ISNULL(StatementText, ExecutingSQL)
+    DatabaseName,
+    LastFullBackupTime,
+    FullBackupSize_GB,
+    LastDiffBackupTime,
+    DiffBackupSize_GB,
+    LastLogBackupTime,
+    LogBackupSize_MB
 )
-INSERT INTO #LongRunningQueries
-SELECT 
-    c.StartTime,
-    m.MaxElapsedTime AS ElapsedTime,
-    c.SPID,
-    c.UserName,
-    c.ProgramName,
-    c.DatabaseName,
-    c.ExecutingSQL,
-    c.WaitType,
-    c.StatementText,
-    c.StoredProcedure
-FROM CTE c
-INNER JOIN MaxElapsed m
-    ON c.SPID = m.SPID
-    AND c.DatabaseName = m.DatabaseName
-    AND ISNULL(c.StatementText, c.ExecutingSQL) = m.QueryText
-WHERE c.rn = 1 and c.DatabaseName  NOT IN ('DBADB')
-ORDER BY m.MaxElapsedTime DESC;
-
-/*********************/  
-/****** Blocking Queries Info *********/  
-/*********************/  
-IF OBJECT_ID('tempdb..#BlockedQueriesLast24Hrs') IS NOT NULL
-    DROP TABLE #BlockedQueriesLast24Hrs;-- Create a temporary table
-CREATE TABLE #BlockedQueriesLast24Hrs
-(
-    BlockedSessionID INT,
-    StartTime DATETIME,
-    WaitingInMinutes INT,
-    WaitType NVARCHAR(120),
-    BlockingSessionID INT,
-    QueryWaiting NVARCHAR(MAX)
-);
-
-;WITH CTE AS
-(
-    SELECT BlockedSessionID,
-        BlockingSessionID,
-        StartTime,
-        WaitingInMinutes,
-        WaitType,
-        QueryWaiting,
-           ROW_NUMBER() OVER
-           (
-               PARTITION BY 
-                   BlockedSessionID,
-                   BlockingSessionID,
-                   ISNULL(QueryWaiting, '')
-               ORDER BY logdate DESC
-           ) AS rn
-    FROM [DBADB].[dbo].[BlockedQueriesInfo]
-    WHERE StartTime >= DATEADD(HOUR, -24, GETDATE())
-)
-INSERT INTO #BlockedQueriesLast24Hrs
 SELECT
-    BlockedSessionID,
-    StartTime,
-    WaitingInMinutes,
-    WaitType,
-    BlockingSessionID,
-    QueryWaiting
-FROM CTE
+    d.name AS DatabaseName,
+
+    fb.backup_finish_date AS LastFullBackupTime,
+    fb.BackupSize_GB      AS FullBackupSize_GB,
+
+    db.backup_finish_date AS LastDiffBackupTime,
+    db.BackupSize_GB      AS DiffBackupSize_GB,
+
+    lb.backup_finish_date AS LastLogBackupTime,
+    lb.BackupSize_GB*1024      AS LogBackupSize_MB
+
+FROM sys.databases d
+LEFT JOIN BackupCTE fb
+    ON d.name = fb.database_name
+   AND fb.type = 'D'
+   AND fb.rn = 1
+
+LEFT JOIN BackupCTE db
+    ON d.name = db.database_name
+   AND db.type = 'I'
+   AND db.rn = 1
+
+LEFT JOIN BackupCTE lb
+    ON d.name = lb.database_name
+   AND lb.type = 'L'
+   AND lb.rn = 1
+
+WHERE d.database_id > 4 and DB_NAME(d.database_id) NOT IN ('DBADB')
+ORDER BY d.name;
+
+/*********************/  
+/****** Job Failure Last 24 hours *********/  
+/*********************/  
+
+IF OBJECT_ID('tempdb..#JobFailureSummary') IS NOT NULL
+    DROP TABLE #JobFailureSummary;
+
+CREATE TABLE #JobFailureSummary
+(
+    JobName                NVARCHAR(255),
+    FailureCount_Last24Hrs INT,
+    FirstFailureTime_UTC   NVARCHAR(255),
+    LastFailureTime_UTC    NVARCHAR(255),
+    LastFailedStep         NVARCHAR(255),
+    JobOwner               NVARCHAR(255),
+    JobCategory            NVARCHAR(255),
+    JobStatus              NVARCHAR(20)
+);
+
+INSERT INTO #JobFailureSummary
+(
+    JobName,
+    FailureCount_Last24Hrs,
+    FirstFailureTime_UTC,
+    LastFailureTime_UTC,
+    LastFailedStep,
+    JobOwner,
+    JobCategory,
+    JobStatus
+)
+SELECT
+    j.sql_server_agent_job_name AS JobName,
+    COUNT(f.sql_server_agent_job_failure_id) AS FailureCount_Last24Hrs,
+    FORMAT(MIN(f.job_failure_time_utc), 'yyyy-MM-dd hh:mm tt') AS FirstFailureTime_UTC,
+    FORMAT(MAX(f.job_failure_time_utc), 'yyyy-MM-dd hh:mm tt') AS LastFailureTime_UTC,
+    MAX(f.job_failure_step_name) AS LastFailedStep,
+    MAX(j.owner_login_name) AS JobOwner,
+    MAX(j.job_category_name) AS JobCategory,
+    CASE 
+        WHEN MAX(CAST(j.is_enabled AS INT)) = 1 THEN 'Enabled'
+        ELSE 'Disabled'
+    END AS JobStatus
+FROM DBADB.dbo.sql_server_agent_job_failure f
+JOIN DBADB.dbo.sql_server_agent_job j
+    ON f.sql_server_agent_job_id = j.sql_server_agent_job_id
+WHERE f.job_failure_time_utc >= DATEADD(HOUR, -24, GETUTCDATE())
+  AND j.is_deleted = 0
+GROUP BY
+    j.sql_server_agent_job_name
+ORDER BY
+    FailureCount_Last24Hrs DESC,
+    LastFailureTime_UTC DESC;
+
+/*********************/  
+/****** Hourly Wait Stats Last 24 Hours *********/  
+/*********************/  
+
+-- Drop temp table if exists
+IF OBJECT_ID('tempdb..#WaitStatsHourly') IS NOT NULL
+    DROP TABLE #WaitStatsHourly;
+
+-- Create temp table
+CREATE TABLE #WaitStatsHourly
+(
+    DateHour    DATETIME,
+    CPU_Pct     DECIMAL(10,2),
+    IO_Data_Pct DECIMAL(10,2),
+    IO_Log_Pct  DECIMAL(10,2),
+    Memory_Pct  DECIMAL(10,2),
+    Lock_Pct    DECIMAL(10,2),
+	Network_Pct     DECIMAL(10,2) 
+);
+
+-- Insert aggregated hourly wait stats
+;WITH Last24H AS
+(
+    SELECT
+        DATEADD(HOUR, DATEDIFF(HOUR, 0, Date), 0) AS DateHour,
+        WaitType,
+        Percentage
+    FROM dbo.WaitStatData
+    WHERE Date >= DATEADD(HOUR,-24,GETDATE())
+      AND WaitType NOT IN ('SOS_WORK_DISPATCHER')  -- mandatory exclusion
+)
+INSERT INTO #WaitStatsHourly (DateHour, CPU_Pct, IO_Data_Pct, IO_Log_Pct, Memory_Pct, Lock_Pct, Network_Pct)
+SELECT
+    DateHour,
+
+    -- CPU
+    SUM(CASE WHEN WaitType = 'SOS_SCHEDULER_YIELD'
+             THEN Percentage ELSE 0 END) AS CPU_Pct,
+
+    -- IO (Data)
+    SUM(CASE WHEN WaitType LIKE 'PAGEIOLATCH%'
+             THEN Percentage ELSE 0 END) AS IO_Data_Pct,
+
+    -- IO (Log)
+    SUM(CASE WHEN WaitType = 'WRITELOG'
+             THEN Percentage ELSE 0 END) AS IO_Log_Pct,
+
+    -- Memory
+    SUM(CASE WHEN WaitType = 'RESOURCE_SEMAPHORE'
+             THEN Percentage ELSE 0 END) AS Memory_Pct,
+
+    -- Locking
+    SUM(CASE WHEN WaitType LIKE 'LCK_%'
+             THEN Percentage ELSE 0 END) AS Lock_Pct,
+	-- Network
+    SUM(CASE WHEN WaitType = 'ASYNC_NETWORK_IO'
+             THEN Percentage ELSE 0 END) AS Network_Pct
+
+FROM Last24H
+GROUP BY DateHour
+ORDER BY DateHour;
+
+/*********************/  
+/****** Long Running Queries Summary Last 24 Hours *********/  
+/*********************/  
+
+-- Drop temp table if exists
+IF OBJECT_ID('tempdb..#LongRunningSummary') IS NOT NULL
+    DROP TABLE #LongRunningSummary;
+
+-- Create temp table
+CREATE TABLE #LongRunningSummary
+(
+    Less_5_Min        INT,
+    Between_5_10_Min  INT,
+    Between_10_25_Min INT,
+    Greater_25_Min    INT,
+    TotalQueries      INT,
+    SummaryDate       DATETIME DEFAULT GETDATE()
+);
+
+-- Insert aggregated counts into temp table
+;WITH DistinctQueries AS
+(
+    -- Remove duplicates: same query text + database, pick only first occurrence
+    SELECT 
+        InstanceName,
+        StartTime,
+        SPID,
+        UserName,
+        ProgramName,
+        DatabaseName,
+        ExecutingSQL,
+        WaitType,
+        logdate,
+        StatementText,
+        StoredProcedure,
+        is_closed,
+        -- Convert HH:MM:SS string to total seconds
+        DATEDIFF(SECOND, 0, CAST(ElapsedTime AS TIME)) AS ElapsedSeconds,
+        ROW_NUMBER() OVER(
+            PARTITION BY DatabaseName, ExecutingSQL 
+            ORDER BY logdate
+        ) AS rn
+    FROM DBADB.dbo.longqrydetails
+    WHERE logdate >= DATEADD(HOUR,-24,GETDATE())  -- only last 24 hours
+)
+INSERT INTO #LongRunningSummary (Less_5_Min, Between_5_10_Min, Between_10_25_Min, Greater_25_Min, TotalQueries)
+SELECT
+    COUNT(CASE WHEN ElapsedSeconds < 300 THEN 1 END) AS Less_5_Min,
+    COUNT(CASE WHEN ElapsedSeconds >= 300 AND ElapsedSeconds < 600 THEN 1 END) AS Between_5_10_Min,
+    COUNT(CASE WHEN ElapsedSeconds >= 600 AND ElapsedSeconds < 1500 THEN 1 END) AS Between_10_25_Min,
+    COUNT(CASE WHEN ElapsedSeconds >= 1500 THEN 1 END) AS Greater_25_Min,
+    COUNT(*) AS TotalQueries
+FROM DistinctQueries
+WHERE rn = 1;  -- only first occurrence per query
+
+/*********************/  
+/****** Head Blocker Queries Info *********/  
+/*********************/  
+IF OBJECT_ID('tempdb..#HeadBlockerSummary') IS NOT NULL
+    DROP TABLE #HeadBlockerSummary;
+
+CREATE TABLE #HeadBlockerSummary
+(
+    head_blocker_session_id   INT,
+    head_blocker_query        NVARCHAR(500),
+    blocking_queries_count    INT,
+    BlockingDuration_HHMMSS   VARCHAR(20),
+    BlockingDuration_Minutes  INT,
+    logdate                   DATETIME,
+    Status                    VARCHAR(20)
+);
+;WITH DedupHeadBlockers AS
+(
+    SELECT
+        head_blocker_session_id,
+        LEFT(head_blocker_query, 500) AS head_blocker_query,
+        blocking_queries_count,
+        duration,
+        DATEDIFF(MINUTE, 0, CAST(duration AS TIME)) AS BlockingDuration_Minutes,
+        logdate,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY head_blocker_session_id
+            ORDER BY logdate DESC
+        ) AS rn
+    FROM DBADB.dbo.HeadBlockingInfo
+    WHERE logdate >= DATEADD(HOUR,-24,GETDATE()) --CAST(logdate AS DATE) = '2025-12-09'
+    
+    -- 🚫 Exclude maintenance / system activity
+    AND head_blocker_query NOT LIKE '%ALTER INDEX%'
+    AND head_blocker_query NOT LIKE '%CREATE%INDEX%'
+    AND head_blocker_query NOT LIKE '%DBCC%'
+    AND head_blocker_query NOT LIKE '%BACKUP%'
+    AND head_blocker_query NOT LIKE '%CHECKDB%'
+    AND head_blocker_query NOT LIKE '%UPDATE STATISTICS%'
+    AND head_blocker_query NOT LIKE '%sp_updatestats%'
+    AND head_blocker_query NOT LIKE '%IndexOptimize%'
+    AND head_blocker_query NOT LIKE '%Maintenance%'
+)
+INSERT INTO #HeadBlockerSummary
+(
+    head_blocker_session_id,
+    head_blocker_query,
+    blocking_queries_count,
+    BlockingDuration_HHMMSS,
+    BlockingDuration_Minutes,
+    logdate,
+    Status
+)
+SELECT
+    head_blocker_session_id,
+    head_blocker_query,
+    blocking_queries_count,
+    duration AS BlockingDuration_HHMMSS,
+    BlockingDuration_Minutes,
+    logdate,
+    CASE
+        WHEN BlockingDuration_Minutes >= 10 
+             OR blocking_queries_count >= 5 THEN 'ACTION REQUIRED'
+        WHEN BlockingDuration_Minutes BETWEEN 5 AND 9 
+             OR blocking_queries_count BETWEEN 2 AND 4 THEN 'WATCH'
+        ELSE 'OK'
+    END AS Status
+FROM DedupHeadBlockers
 WHERE rn = 1;
 
 
-
-
-/*********************/  
-/****** Wait Stats *********/  
-/*********************/  
-IF OBJECT_ID('tempdb..##WaitStatsLast24Hrss') IS NOT NULL
-    DROP TABLE #WaitStatsLast24Hrs;-- Create a temporary table
-
-	-- Create temporary table
-CREATE TABLE #WaitStatsLast24Hrs
-(
-    WaitType NVARCHAR(60),
-    Total_Wait_S FLOAT,
-    Total_Signal_S FLOAT,
-    Total_WaitCount INT,
-    Avg_Wait_S FLOAT
-);
-
--- Insert aggregated data into temp table
-INSERT INTO #WaitStatsLast24Hrs
-SELECT  
-    WaitType,
-    SUM(Wait_S)        AS Total_Wait_S,
-    SUM(Signal_S)      AS Total_Signal_S,
-    SUM(WaitCount)     AS Total_WaitCount,
-    AVG(AverageWait_S) AS Avg_Wait_S
-FROM [DBADB].[dbo].[WaitStatData]
-WHERE [Date] >= DATEADD(HOUR, -24, GETDATE())
-GROUP BY WaitType
-ORDER BY SUM(Wait_S) DESC;
 
 /*********************/  
 /****** HTML Preparation *********/  
 /*********************/  
   
 DECLARE @TableHTML  VARCHAR(MAX),                                    
-  @StrSubject VARCHAR(100),                                    
-  @Oriserver VARCHAR(100),                                
+  @StrSubject VARCHAR(100),                                 
   @Version VARCHAR(250),                                
   @Edition VARCHAR(100),                                
-  @ISClustered VARCHAR(100),                                
-  @SP VARCHAR(100),                                
-  @ServerCollation VARCHAR(100),                                
-  @SingleUser VARCHAR(5),                                
-  @LicenseType VARCHAR(100),                                
-  @Cnt int,           
+  @SP VARCHAR(100),          
   @URL varchar(1000),                                
   @Str varchar(1000),                                
   @NoofCriErrors varchar(3)       
-  
--- Variable Assignment              
+           
   
 SELECT @Version = @@version                                
-SELECT @Edition = CONVERT(VARCHAR(100), serverproperty('Edition'))                                
-SET @Cnt = 0                                
-IF serverproperty('IsClustered') = 0                                 
-BEGIN                                
- SELECT @ISClustered = 'No'                                
-END                                
-ELSE        
-BEGIN                                
- SELECT @ISClustered = 'YES'                                
-END                                
-SELECT @SP = CONVERT(VARCHAR(100), SERVERPROPERTY ('productlevel'))                                
-SELECT @ServerCollation = CONVERT(VARCHAR(100), SERVERPROPERTY ('Collation'))                                 
-SELECT @LicenseType = CONVERT(VARCHAR(100), SERVERPROPERTY ('LicenseType'))                                 
-SELECT @SingleUser = CASE SERVERPROPERTY ('IsSingleUser')                                
-      WHEN 1 THEN 'Yes'                                
-      WHEN 0 THEN 'No'                                
-      ELSE                                
-      'null' END                                
-SELECT @OriServer = CONVERT(VARCHAR(50), SERVERPROPERTY('servername'))                                  
-SELECT @strSubject = 'Retail Scan Database Server Health Check Report for  ('+ CONVERT(VARCHAR(100), @SERVERNAME) + ')'                                    
+SELECT @Edition = CONVERT(VARCHAR(50), serverproperty('Edition'))                                                               
+SELECT @SP = CONVERT(VARCHAR(50), SERVERPROPERTY ('productlevel'))                                                                 
+SELECT @strSubject = ISNULL(@ClientName, 'ClientName') + ' Database Server Health Check Report (' + ISNULL(@Server, @@SERVERNAME)+ ')';
+                                    
 
-  
-SET @TableHTML =
-'<font face="Verdana" size="4">Health Check Report</font>
-<br><br>
 
-<table border="1" cellpadding="0" cellspacing="0"
-       style="border-collapse: collapse"
-       bordercolor="#111111"
-       width="933"
-       height="60">
+SET @TableHTML = 
+'<font face="Verdana" size="2">
+My Dear DBA,<br><br>
+Good Morning,<br><br>
+Please review the SQL Server health check information below.  
+This report provides key observations and analysis collected during the health check window.  
+Kindly review and take necessary action where required.<br><br>
+</font>';
 
-<tr>
-    <td align="Center" bgcolor="#001F3D">
-        <font face="Verdana" size="2" color="#FFFFFF"><b>SQL Server Name</b></font>
-    </td>
-    <td align="Center" bgcolor="#001F3D">
-        <font face="Verdana" size="2" color="#FFFFFF"><b>Date</b></font>
-    </td>
-    <td align="Center" bgcolor="#001F3D">
-        <font face="Verdana" size="2" color="#FFFFFF"><b>Time</b></font>
-    </td>
-</tr>
 
-<tr>
-    <td align="Center">
-        <font face="Verdana" size="2">' + @@SERVERNAME + '</font>
-    </td>
-    <td align="Center">
-        <font face="Verdana" size="2">' + CONVERT(VARCHAR(10), GETDATE(), 105) + '</font>
-    </td>
-    <td align="Center">
-    <font face="Verdana" size="2">' +
-    FORMAT(GETDATE(), 'hh:mm tt') +
-    '</font>
-</td>
-</tr>'
-
- SELECT                                   
- @TableHTML = @TableHTML +                                     
- '</table> 
-
- <p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>                                  
- <font face="Verdana" size="4">SQL Server Details  </font>  
+ SET                                   
+ @TableHTML =     @TableHTML +                                
+ '</table>                                  
+ <font face="Verdana" size="4"><b>SQL Server Details  </b></font>  
  <table width="933" cellpadding="0" cellspacing="0" border="0">
     <tr><td height="6">&nbsp;</td></tr>
 </table>
@@ -1115,24 +938,12 @@ SET @TableHTML =
  <td align="Center" width="17%" bgColor="001F3D" height="15"><b>                                
  <font face="Verdana" color="#ffffff" size="1">Edition</font></b></td>                                
  <td align="Center" width="35%" bgColor="001F3D" height="15"><b>                                
- <font face="Verdana" color="#ffffff" size="1">Service Pack</font></b></td>                                
- <td align="Center" width="60%" bgColor="001F3D" height="15"><b>                                
- <font face="Verdana" color="#ffffff" size="1">Collation</font></b></td>                                
- <td align="Center" width="93%" bgColor="001F3D" height="15"><b>                                
- <font face="Verdana" color="#ffffff" size="1">LicenseType</font></b></td>                                
- <td align="Center" width="40%" bgColor="001F3D" height="15"><b>                                
-<font face="Verdana" color="#ffffff" size="1">SingleUser</font></b></td>                                
- <td align="Center" width="93%" bgColor="001F3D" height="15"><b>                                
- <font face="Verdana" color="#ffffff" size="1">Clustered</font></b></td>                                
+ <font face="Verdana" color="#ffffff" size="1">Service Pack</font></b></td>                                                                
  </tr>                                
  <tr>                                
  <td align="Center" width="50%" height="27"><font face="Verdana" size="1">'+@version +'</font></td>                                
  <td align="Center" width="17%" height="27"><font face="Verdana" size="1">'+@edition+'</font></td>                                
  <td align="Center" width="18%" height="27"><font face="Verdana" size="1">'+@SP+'</font></td>                                
- <td align="Center" width="17%" height="27"><font face="Verdana" size="1">'+@ServerCollation+'</font></td>                                
- <td align="Center" width="25%" height="27"><font face="Verdana" size="1">'+@LicenseType+'</font></td>                                
- <td align="Center" width="25%" height="27"><font face="Verdana" size="1">'+@SingleUser+'</font></td>                                
- <td align="Center" width="93%" height="27"><font face="Verdana" size="1">'+@isclustered+'</font></td>                                
  </tr> '                               
  
  --AG Report
@@ -1304,16 +1115,20 @@ SET @TableHTML =
  @TableHTML = @TableHTML +                                     
  '</table>                                  
  <p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>                                  
- <font face="Verdana" size="4">Instance Last Recycled Status  </font>  
+ <font face="Verdana" size="4"><b>Services Last Recycled Status  </b></font>  
  <table width="933" cellpadding="0" cellspacing="0" border="0">
     <tr><td height="6">&nbsp;</td></tr>
 </table>
  <table style="BORDER-COLLAPSE: collapse" borderColor="#111111" cellPadding="0" width="933" bgColor="#ffffff" borderColorLight="#000000" border="1">                                      
  <tr>                                      
  <th align="Center" width="50" bgColor="001F3D">                                      
-  <font face="Verdana" size="1" color="#FFFFFF">Last Recycle Date</font></th>                                      
+  <font face="Verdana" size="1" color="#FFFFFF">Service_Name</font></th> 
+  <th align="Center" width="50" bgColor="001F3D">                                      
+  <font face="Verdana" size="1" color="#FFFFFF">Service_Status</font></th> 
+  <th align="Center" width="50" bgColor="001F3D">                                      
+  <font face="Verdana" size="1" color="#FFFFFF">Last Recycle Date & Time</font></th> 
  <th align="Center" width="50" bgColor="001F3D">                                      
-  <font face="Verdana" size="1" color="#FFFFFF">Current DateTime</font></th>                                      
+  <font face="Verdana" size="1" color="#FFFFFF">Current Date & Time</font></th>                                      
  <th align="Center" width="50" bgColor="001F3D">                                   
  <font face="Verdana" size="1" color="#FFFFFF">UpTimeInDays</font></th>                                      
   </tr>'  
@@ -1321,9 +1136,14 @@ SET @TableHTML =
 SELECT                                   
  @TableHTML =  @TableHTML +                                       
  '<tr>                                    
- <td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), LastRecycle ), '')  +'</font></td>' +                                        
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  CurrentDate ), '')  +'</font></td>' +                                   
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  UpTimeInDays ), '')  +'</font></td>' +                                        
+ <td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), ServiceName ), '')  +'</font></td>' +                                        
+'<td align="Center"><font face="Verdana" size="1" color="' +
+        CASE WHEN ServiceStatus = 'Running' THEN '#40C211' ELSE '#FF0000' END + '">' + 
+        ISNULL(CONVERT(VARCHAR(10), ServiceStatus), '') +
+    '</font></td>' +                                   
+ '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  RestartTime ), '')  +'</font></td>' +  
+ '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  CurrentTime ), '')  +'</font></td>' +
+ '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  UpTimeInDays ), '')  +'</font></td>' +
   '</tr>'                                  
 FROM                                   
  #RebootDetails 
@@ -1333,7 +1153,7 @@ SELECT
  @TableHTML =  @TableHTML +                              
  '</table>                                  
  <p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>                                  
- <font face="Verdana" size="4">CPU Usage Last 24 Hours </font>        
+ <font face="Verdana" size="4"><b>CPU Usage Last 24 Hours </b></font>        
  <table width="933" cellpadding="0" cellspacing="0" border="0">
     <tr><td height="6">&nbsp;</td></tr>
 </table>
@@ -1345,69 +1165,49 @@ SELECT
  <font face="Verdana" size="1" color="#FFFFFF">Maximum_Utilization (%)</font></th>               
  <th align="Center" width="250" bgColor="001F3D">                                    
  <font face="Verdana" size="1" color="#FFFFFF">Average_Utilization (%)</font></th>               
-              
+ <th align="Center" width="250" bgColor="001F3D">                                    
+ <font face="Verdana" size="1" color="#FFFFFF">Maximum_Utilization Count</font></th>              
    </tr>'                                  
 SELECT                                   
  @TableHTML =  @TableHTML +                                     
  '<tr>' +                                      
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), Min_Total_CPU ), '')  +'</font></td>' +    
-  '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), Max_Total_CPU ), '')  +'</font></td>' +                              
-   '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), Avg_Total_CPU ), '')  +'</font></td></tr>'                                  
+ '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(10), Min_Total_CPU ), '')  +'</font></td>' +    
+  '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(10), Max_Total_CPU ), '')  +'</font></td>' +                              
+   '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(10), Avg_Total_CPU ), '')  +'</font></td>'+   
+    '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(10), Max_CPU_Hit_Count ), '')  +'</font></td></tr>'
 FROM                                   
  #CPU  
 
- /** Memory Usage ***/  
+  /** PLE Status ***/  
 SELECT                                   
  @TableHTML =  @TableHTML +                              
  '</table>                                  
  <p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>                                  
- <font face="Verdana" size="4">Memory Usage </font>  
+ <font face="Verdana" size="4"><b>PLE Status Last 24 Hours </b></font>        
  <table width="933" cellpadding="0" cellspacing="0" border="0">
     <tr><td height="6">&nbsp;</td></tr>
 </table>
  <table id="AutoNumber1" style="BORDER-COLLAPSE: collapse" borderColor="#111111" height="40" cellSpacing="0" cellPadding="0" width="933" border="1">                                  
    <tr>                
- <th align="left" width="136" bgColor="001F3D">                                    
- <font face="Verdana" size="1" color="#FFFFFF">Parameter</font></th>                              
-  <th align="left" width="200" bgColor="001F3D">               
- <font face="Verdana" size="1" color="#FFFFFF">Value</font></th>              
+ <th align="Center" width="300" bgColor="001F3D">                                    
+ <font face="Verdana" size="1" color="#FFFFFF">Minimum_PLE (Sec)</font></th>               
+ <th align="Center" width="300" bgColor="001F3D">                                    
+ <font face="Verdana" size="1" color="#FFFFFF">Maximum_PLE (Sec)</font></th>               
+ <th align="Center" width="250" bgColor="001F3D">                                    
+ <font face="Verdana" size="1" color="#FFFFFF">Average_PLE (Sec)</font></th>               
+ <th align="Center" width="250" bgColor="001F3D">                                    
+ <font face="Verdana" size="1" color="#FFFFFF">PLE < 300 (Sec) Count</font></th>              
    </tr>'                                  
 SELECT                                   
- @TableHTML =  @TableHTML +                                       
- '<tr>                                    
- <td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(200),  Parameter ), '')  +'</font></td>' +                                        
- '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  Value ), '')  +'</font></td>' +                                     
-  '</tr>'                                  
+ @TableHTML =  @TableHTML +                                     
+ '<tr>' +                                      
+ '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(10), MinPLE ), '')  +'</font></td>' +    
+  '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(10), MaxPLE ), '')  +'</font></td>' +                              
+   '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(10), AvgPLE ), '')  +'</font></td>'+   
+    '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(10), PLE_Less_Than_300_Count ), '')  +'</font></td></tr>'
 FROM                                   
- #Memory;  
-
- /** Performance Counter Values ***/  
-SELECT                                   
- @TableHTML =  @TableHTML +                              
- '</table>                                  
- <p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>                                  
- <font face="Verdana" size="4">Performance Counter Data</font>    
- <table width="933" cellpadding="0" cellspacing="0" border="0">
-    <tr><td height="6">&nbsp;</td></tr>
-</table>
- <table id="AutoNumber1" style="BORDER-COLLAPSE: collapse" borderColor="#111111" height="40" cellSpacing="0" cellPadding="0" width="933" border="1">                                  
-   <tr>                
- <th align="left" width="136" bgColor="001F3D">                                    
- <font face="Verdana" size="1" color="#FFFFFF">Performance_Counter</font></th>                              
-  <th align="left" width="200" bgColor="001F3D">               
- <font face="Verdana" size="1" color="#FFFFFF">Value</font></th>              
-   </tr>'                                  
-SELECT                                   
- @TableHTML =  @TableHTML +                                       
- '<tr>                                    
- <td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(200),  Parameter ), '')  +'</font></td>' +                                        
- '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  Value ), '')  +'</font></td>' +                                     
-  '</tr>'                                  
-FROM                                   
- #PerfCntr_Data;   
-
-                              
-                            
+ #PLE
+                                                     
 /** Free Disk Space Report ***/  
  
 SELECT
@@ -1416,7 +1216,7 @@ SELECT
 
 <p style="margin-top:0; margin-bottom:0">&nbsp;</p>
 
-<font face="Verdana" size="4">Disk Space Usage</font>
+<font face="Verdana" size="4"><b>Disk Space Usage</b></font>
 
 <!-- Small space after heading -->
 <table width="933" cellpadding="0" cellspacing="0" border="0">
@@ -1453,20 +1253,17 @@ SELECT
                                   
 SELECT                                   
  @TableHTML = @TableHTML +   
-
-  
 '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), Drive_Letter),'') + '</font></td>' +  
  '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), TotalSpace_GB),'') + '</font></td>' +                                  
  '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), UsedSpace_GB),'') +'</font></td>' +     
   '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(max), FreeSpace_GB),'') +'</font></td>' +
---'<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(max), Percentage_Free),'') +'</font></td></tr>'
 CASE WHEN Percentage_Full > 90 THEN
   '<td align="Center"><font face="Verdana" size="1" color="#FF0000"><b>' + ISNULL(CONVERT(VARCHAR(100),  Percentage_Full), '')  +'</font></td>'
 ELSE  
   '<td align="Center"><font face="Verdana" size="1" color="#40C211"><b>' + ISNULL(CONVERT(VARCHAR(100),  Percentage_Full), '')  +'</font></td>'
   END +
   '</tr>'
-FROM #driveinfo
+FROM #driveinfo order By Drive_Letter ASC
  
   
 /** Tempdb File Usage ***/  
@@ -1474,7 +1271,7 @@ SELECT
  @TableHTML =  @TableHTML +                              
  '</table>                                  
  <p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>                                  
- <font face="Verdana" size="4">Tempdb File Usage</font>  
+ <font face="Verdana" size="4"><b>Tempdb File Usage</b></font>  
   <table width="933" cellpadding="0" cellspacing="0" border="0">
     <tr><td height="6">&nbsp;</td></tr>
 </table>
@@ -1491,22 +1288,38 @@ SELECT
  <th align="Center" width="200" bgColor="001F3D">               
  <font face="Verdana" size="1" color="#FFFFFF">Available_GB</font></th>               
  <th align="Center" width="200" bgColor="001F3D">                                    
- <font face="Verdana" size="1" color="#FFFFFF">Percentage_Full </font></th>               
+ <font face="Verdana" size="1" color="#FFFFFF">Percentage_Full </font></th>  
+  <th align="Center" width="200" bgColor="001F3D">                                    
+ <font face="Verdana" size="1" color="#FFFFFF">Total_Disk_Space_GB </font></th> 
+  <th align="Center" width="200" bgColor="001F3D">                                    
+ <font face="Verdana" size="1" color="#FFFFFF">Available_Disk_Space_GB </font></th> 
+  <th align="Center" width="200" bgColor="001F3D">                                    
+ <font face="Verdana" size="1" color="#FFFFFF">Auto_Growth_Status </font></th> 
+  <th align="Center" width="200" bgColor="001F3D">                                    
+ <font face="Verdana" size="1" color="#FFFFFF">Auto_Growth_Value </font></th> 
+  <th align="Center" width="200" bgColor="001F3D">                                    
+ <font face="Verdana" size="1" color="#FFFFFF">Auto_Growth_Max_Limit </font></th> 
    </tr>'                                  
-select                                   
-@TableHTML =  @TableHTML +                                     
- '<tr>' +                                      
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(databasename, '') + '</font></td>' +                                      
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(FileName, '') +'</font></td>' +
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(physicalName, '') +'</font></td>' +                                      
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(filesizeGB, '') +'</font></td>' +                                  
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(availableSpaceGB, '') +'</font></td>' +  
- CASE WHEN CONVERT(DECIMAL(10,3),percentfull) >80.00 THEN    
-'<td align="Center"><font face="Verdana" size="1" color="#FF0000"><b>' + ISNULL(percentfull, '') +'</b></font></td></tr>'                                               
- ELSE  
- '<td align="Center"><font face="Verdana" size="1" color="#40C211"><b>' + ISNULL(CONVERT(VARCHAR(100),  percentfull), '')  +'</font></td>' END                                
-from                                   
- #tempdbfileusage       
+SELECT
+    @TableHTML = @TableHTML +
+    '<tr>' +
+    '<td align="Center"><font face="Verdana" size="1">' + ISNULL(databasename, '') + '</font></td>' +
+    '<td align="Center"><font face="Verdana" size="1">' + ISNULL(filename, '') + '</font></td>' +
+    '<td align="Center"><font face="Verdana" size="1">' + ISNULL(physicalName, '') + '</font></td>' +
+    '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(20), filesizeGB), '') + '</font></td>' +
+    '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(20), availableSpaceGB), '') + '</font></td>' +
+    '<td align="Center"><font face="Verdana" size="1" color="' +
+        CASE WHEN percentfull > 80 THEN '#FF0000' ELSE '#40C211' END + '">' +
+        ISNULL(CONVERT(VARCHAR(10), percentfull), '') +
+    '</font></td>' +
+    '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(20), diskTotalGB), '') + '</font></td>' +
+	'<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(20), diskFreeGB), '') + '</font></td>' +
+	'<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(20), AutoGrowth), '') + '</font></td>' +
+	'<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(20), AutoGrowthSetting), '') + '</font></td>' +
+	'<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(20), MaxSize), '') + '</font></td>' +
+    '</tr>'
+FROM #tempdbfileusage;
+     
   
  
  /** UserDB File Usage ***/  
@@ -1514,7 +1327,7 @@ SELECT
  @TableHTML =  @TableHTML +                              
  '</table>                                  
  <p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>                                  
- <font face="Verdana" size="4">User Database File Usage</font> 
+ <font face="Verdana" size="4"><b>User Database File Usage</b></font> 
   <table width="933" cellpadding="0" cellspacing="0" border="0">
     <tr><td height="6">&nbsp;</td></tr>
 </table>
@@ -1527,41 +1340,55 @@ SELECT
  <th align="Center" width="300" bgColor="001F3D">                                    
  <font face="Verdana" size="1" color="#FFFFFF">Database Name</font></th>               
  <th align="Center" width="300" bgColor="001F3D">                                    
- <font face="Verdana" size="1" color="#FFFFFF">File Name</font></th>   
+ <font face="Verdana" size="1" color="#FFFFFF">File Name</font></th> 
  <th align="Center" width="300" bgColor="001F3D">                                    
- <font face="Verdana" size="1" color="#FFFFFF">File Type</font></th> 
- <th align="Center" width="250" bgColor="001F3D">                                    
+ <font face="Verdana" size="1" color="#FFFFFF">File Type</font></th>
+ <th align="Center" width="250" bgColor="001F3D"> 
  <font face="Verdana" size="1" color="#FFFFFF">Physical Name</font></th>               
  <th align="Center" width="250" bgColor="001F3D">                                
  <font face="Verdana" size="1" color="#FFFFFF">FileSize_GB</font></th>               
  <th align="Center" width="200" bgColor="001F3D">               
  <font face="Verdana" size="1" color="#FFFFFF">Available_GB</font></th>               
  <th align="Center" width="200" bgColor="001F3D">                                    
- <font face="Verdana" size="1" color="#FFFFFF">Percentage_Full </font></th>               
+ <font face="Verdana" size="1" color="#FFFFFF">Percentage_Full </font></th>  
+  <th align="Center" width="200" bgColor="001F3D">                                    
+ <font face="Verdana" size="1" color="#FFFFFF">Total_Disk_Space_GB </font></th> 
+  <th align="Center" width="200" bgColor="001F3D">                                    
+ <font face="Verdana" size="1" color="#FFFFFF">Available_Disk_Space_GB </font></th> 
+  <th align="Center" width="200" bgColor="001F3D">                                    
+ <font face="Verdana" size="1" color="#FFFFFF">Auto_Growth_Status </font></th> 
+  <th align="Center" width="200" bgColor="001F3D">                                    
+ <font face="Verdana" size="1" color="#FFFFFF">Auto_Growth_Value </font></th> 
+  <th align="Center" width="200" bgColor="001F3D">                                    
+ <font face="Verdana" size="1" color="#FFFFFF">Auto_Growth_Max_Limit </font></th>                
    </tr>'                                  
-select                                   
-@TableHTML =  @TableHTML +                                     
- '<tr>' +                                      
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(databasename, '') + '</font></td>' +                                      
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(FileName, '') +'</font></td>' + 
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(Type, '') +'</font></td>' +                                     
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(physicalName, '') +'</font></td>' +                                      
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(filesizeGB, '') +'</font></td>' +                                  
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(availableSpaceGB, '') +'</font></td>' +  
- CASE WHEN CONVERT(DECIMAL(10,3),percentfull) >80.00 THEN    
-'<td align="Center"><font face="Verdana" size="1" color="#FF0000"><b>' + ISNULL(percentfull, '') +'</b></font></td></tr>'                                               
- ELSE  
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(percentfull, '') +'</font></td></tr>' END 
-                               
-from                                   
- #UserDBFileUsage    order by filesizeGB desc
+SELECT
+    @TableHTML = @TableHTML +
+    '<tr>' +
+    '<td align="Center"><font face="Verdana" size="1">' + ISNULL(databasename, '') + '</font></td>' +
+    '<td align="Center"><font face="Verdana" size="1">' + ISNULL(filename, '') + '</font></td>' +
+	'<td align="Center"><font face="Verdana" size="1">' + ISNULL(filetype, '') + '</font></td>' +
+    '<td align="Center"><font face="Verdana" size="1">' + ISNULL(physicalName, '') + '</font></td>' +
+    '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(20), filesizeGB), '') + '</font></td>' +
+    '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(20), availableSpaceGB), '') + '</font></td>' +
+    '<td align="Center"><font face="Verdana" size="1" color="' +
+        CASE WHEN percentfull > 80 THEN '#FF0000' ELSE '#40C211' END + '">' +
+        ISNULL(CONVERT(VARCHAR(10), percentfull), '') +
+    '</font></td>' +
+    '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(20), diskTotalGB), '') + '</font></td>' +
+	'<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(20), diskFreeGB), '') + '</font></td>' +
+	'<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(20), AutoGrowth), '') + '</font></td>' +
+	'<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(20), AutoGrowthSetting), '') + '</font></td>' +
+	'<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(20), MaxSize), '') + '</font></td>' +
+    '</tr>'
+FROM #UserDBFileUsage;
    
 /** Database Backup Report ***/  
 SELECT                                   
  @TableHTML =  @TableHTML +                              
  '</table>                                  
  <p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>                                  
- <font face="Verdana" size="4">Backup Report for User Database</font>
+ <font face="Verdana" size="4"><b>Backup Report for User Database</b></font>
    <table width="933" cellpadding="0" cellspacing="0" border="0">
     <tr><td height="6">&nbsp;</td></tr>
 </table>
@@ -1580,37 +1407,74 @@ SELECT
  <th align="Center" width="300" bgColor="001F3D">              
  <font face="Verdana" size="1" color="#FFFFFF">LastLogBackupTime</font></th> 
  <th align="Center" width="300" bgColor="001F3D">               
- <font face="Verdana" size="1" color="#FFFFFF">LogBackupSize_GB</font></th>
+ <font face="Verdana" size="1" color="#FFFFFF">LogBackupSize_MB</font></th>
    </tr>'                                  
 SELECT      
- @TableHTML =  @TableHTML +                                       
- '<tr>                                    
- <td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  DatabaseName ), '')  +'</font></td>' +                                        
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  LastFullBackupTime), 'NULL')  +'</font></td>' +    
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  FullBackupSize_GB), 'NULL')  +'</font></td>' +
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  LastDiffBackupTime), 'NULL')  +'</font></td>' +
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  DiffBackupSize_GB), 'NULL')  +'</font></td>' +
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  LastLogBackupTime), 'NULL')  +'</font></td>' +
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  LogBackupSize_GB), 'NULL')  +'</font></td>' +
-  '</tr>'                                  
-FROM             
- #Backup_Report  
-  
- /** Connection Information ***/  
-  
-       
-      
-
+ @TableHTML = @TableHTML +                                       
+ '<tr>' +
+ '<td align="Center"><font face="Verdana" size="1">' + ISNULL(DatabaseName, '') + '</font></td>' +
+ CASE WHEN LastFullBackupTime IS NULL OR DATEDIFF(DAY, LastFullBackupTime, GETDATE()) > 7 THEN '<td align="Center"><font face="Verdana" size="1" color="#FF0000"><b>' + ISNULL(CONVERT(VARCHAR(19), LastFullBackupTime, 120), '') + '</b></font></td>'
+ ELSE '<td align="Center"><font face="Verdana" size="1" color="#40C211">'+ CONVERT(VARCHAR(19), LastFullBackupTime, 120) + '</font></td>' END +
+ '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(20), FullBackupSize_GB), '') + '</font></td>' +
+ CASE WHEN LastDiffBackupTime IS NULL OR DATEDIFF(DAY, LastDiffBackupTime, GETDATE()) > 2 THEN '<td align="Center"><font face="Verdana" size="1" color="#FF0000"><b>' + ISNULL(CONVERT(VARCHAR(19), LastDiffBackupTime, 120), '') + '</b></font></td>'
+ ELSE '<td align="Center"><font face="Verdana" size="1" color="#40C211">' + CONVERT(VARCHAR(19), LastDiffBackupTime, 120) + '</font></td>' END +
+ '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(20), DiffBackupSize_GB), '') + '</font></td>' +
+ CASE WHEN LastLogBackupTime IS NULL OR DATEDIFF(HOUR, LastLogBackupTime, GETDATE()) > 2  THEN '<td align="Center"><font face="Verdana" size="1" color="#FF0000"><b>' + ISNULL(CONVERT(VARCHAR(19), LastLogBackupTime, 120), '') + '</b></font></td>'
+ ELSE '<td align="Center"><font face="Verdana" size="1" color="#40C211">' + CONVERT(VARCHAR(19), LastLogBackupTime, 120) + '</font></td>' END +
+ '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(20), LogBackupSize_MB), '') + '</font></td>' + '</tr>'
+FROM #Backup_Report 
  
+   
  /**Failed Jobs in Last 24Hrs****/
- IF EXISTS (SELECT 1 FROM #Failed_jobs)
+ IF EXISTS (SELECT 1 FROM #JobFailureSummary)
 BEGIN
 
 SELECT                                   
  @TableHTML = @TableHTML +                                   
  '</table>                          
  <p style="margin-top: 0; margin-bottom: 0">&nbsp;</p>                                  
- <font face="Verdana" size="4">Failed Jobs in Last 24Hrs</font><br><br>' +
+ <font face="Verdana" size="4"><b>Failed Jobs in Last 24Hrs</b></font><br><br>' +
+   
+ '<table style="BORDER-COLLAPSE: collapse" borderColor="#111111" cellPadding="0" width="1500" bgColor="#ffffff" borderColorLight="#000000" border="1"> 
+ 
+ <tr>                                    
+ <th align="Center" width="300" bgColor="001F3D">                                    
+ <font face="Verdana" size="1" color="#FFFFFF">Job Name</font></th>   
+ <th align="Center" width="300" bgColor="001F3D">                                   
+ <font face="Verdana" size="1" color="#FFFFFF">Failure_Count</font></th>                                    
+ <th align="Center" width="300" bgColor="001F3D">                                    
+ <font face="Verdana" size="1" color="#FFFFFF">First_Failure_Time</font></th>                                   
+ <th align="Center" width="300" bgColor="001F3D">                                  
+ <font face="Verdana" size="1" color="#FFFFFF">Last_Failure_Time</font></th>   
+  <th align="Center" width="300" bgColor="001F3D">                                  
+ <font face="Verdana" size="1" color="#FFFFFF">Last_Failed_Step</font></th> 
+  <th align="Center" width="300" bgColor="001F3D">                                  
+ <font face="Verdana" size="1" color="#FFFFFF">Job_Owner</font></th> 
+  <th align="Center" width="300" bgColor="001F3D">                                  
+ <font face="Verdana" size="1" color="#FFFFFF">Job_Category</font></th> 
+  <th align="Center" width="300" bgColor="001F3D">                                  
+ <font face="Verdana" size="1" color="#FFFFFF">Job_Status</font></th> 
+ </tr>'                                    
+END
+
+SELECT                                   
+ @TableHTML = @TableHTML +                                      
+'<tr><td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), JobName),'') + '</font></td>' +                       
+ '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(5), FailureCount_Last24Hrs),'') + '</font></td>' +                                  
+ '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), FirstFailureTime_UTC),'') +'</font></td>' +  
+ '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), LastFailureTime_UTC),'') +'</font></td>' + 
+ '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), LastFailedStep),'') +'</font></td>' + 
+  '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), JobOwner),'') +'</font></td>' + 
+'<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), JobCategory),'') +'</font></td>' + 
+  '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(10), JobStatus),'') +'</font></td></tr>'      
+FROM #JobFailureSummary
+
+
+-- Initialize HTML table variable
+SELECT @TableHTML = @TableHTML +
+ '</table>                          
+ <p style="margin-top: 0; margin-bottom: 0">&nbsp;</p>                                  
+ <font face="Verdana" size="4"><b>Wait Statistics Report in Last 24Hrs</b></font><br><br>' +
    
  '<table style="BORDER-COLLAPSE: collapse" borderColor="#111111" cellPadding="0" width="1500" bgColor="#ffffff" borderColorLight="#000000" border="1"> 
  
@@ -1618,227 +1482,308 @@ SELECT
  <th align="Center" width="300" bgColor="001F3D">                                    
  <font face="Verdana" size="1" color="#FFFFFF">Date & Time</font></th>   
  <th align="Center" width="300" bgColor="001F3D">                                   
- <font face="Verdana" size="1" color="#FFFFFF">Job_name</font></th>                                    
+ <font face="Verdana" size="1" color="#FFFFFF">CPU (%)</font></th>                                    
  <th align="Center" width="300" bgColor="001F3D">                                    
- <font face="Verdana" size="1" color="#FFFFFF">Failure_Job_Step_No</font></th>                                   
+ <font face="Verdana" size="1" color="#FFFFFF">IO Data (%)</font></th>                                   
  <th align="Center" width="300" bgColor="001F3D">                                  
- <font face="Verdana" size="1" color="#FFFFFF">Error_Message</font></th>                                                                    
- </tr>'                                    
-END
+ <font face="Verdana" size="1" color="#FFFFFF">IO Log (%)</font></th>   
+  <th align="Center" width="300" bgColor="001F3D">                                  
+ <font face="Verdana" size="1" color="#FFFFFF">Memory (%)</font></th> 
+  <th align="Center" width="300" bgColor="001F3D">                                  
+ <font face="Verdana" size="1" color="#FFFFFF">Lock (%)</font></th> 
+   <th align="Center" width="300" bgColor="001F3D">                                  
+ <font face="Verdana" size="1" color="#FFFFFF">Network (%)</font></th> 
+  <th align="Center" width="300" bgColor="001F3D">                                  
+ <font face="Verdana" size="1" color="#FFFFFF">Over all Status</font></th> 
+ </tr>'  
 
-SELECT                                   
- @TableHTML = @TableHTML +                                      
-'<tr><td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), date_time),'') + '</font></td>' +                       
- '<td align="Center"><font face="Verdana" size="1" color="#FF0000">' + ISNULL(CONVERT(VARCHAR(50), job_name),'') + '</font></td>' +                                  
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), job_step),'') +'</font></td>' +     
-  '<td><font face="Verdana" size="1" color="#FF0000">' + ISNULL(CONVERT(VARCHAR(max), error_message),'') +'</font></td></tr>'      
-FROM #Failed_jobs
-  
-  
-/*** Job Info ****/  
- IF EXISTS (SELECT 1 FROM #JobInfo)
+-- Build table rows with color-coded flags
+SELECT @TableHTML = @TableHTML +
+'<tr>' +
+'<td align="Center"><font face="Verdana" size="1">' + CONVERT(VARCHAR, DateHour, 120) + '</font></td>' +
+
+-- CPU column with color
+'<td align="Center"><font face="Verdana" size="1" color="' +
+    CASE 
+        WHEN CPU_Pct > 40 THEN '#FF0000'       -- red
+        WHEN CPU_Pct BETWEEN 20 AND 40 THEN '#FFD700' -- yellow
+        ELSE '#40C211'                         -- green
+    END + '">' +
+    CONVERT(VARCHAR(10), CPU_Pct) +
+'</font></td>' +
+
+-- IO_Data column
+'<td align="Center"><font face="Verdana" size="1" color="' +
+    CASE 
+        WHEN IO_Data_Pct > 40 THEN '#FF0000'
+        WHEN IO_Data_Pct BETWEEN 25 AND 40 THEN '#FFD700'
+        ELSE '#40C211'
+    END + '">' +
+    CONVERT(VARCHAR(10), IO_Data_Pct) +
+'</font></td>' +
+
+-- IO_Log column
+'<td align="Center"><font face="Verdana" size="1" color="' +
+    CASE 
+        WHEN IO_Log_Pct >= 20 THEN '#FF0000'
+        ELSE '#40C211'
+    END + '">' +
+    CONVERT(VARCHAR(10), IO_Log_Pct) +
+'</font></td>' +
+
+-- Memory column
+'<td align="Center"><font face="Verdana" size="1" color="' +
+    CASE 
+        WHEN Memory_Pct > 0 THEN '#FFD700'
+        ELSE '#40C211'
+    END + '">' +
+    CONVERT(VARCHAR(10), Memory_Pct) +
+'</font></td>' +
+
+-- Lock column
+'<td align="Center"><font face="Verdana" size="1" color="' +
+    CASE 
+        WHEN Lock_Pct >= 10 THEN '#FF0000'
+        ELSE '#40C211'
+    END + '">' +
+    CONVERT(VARCHAR(10), Lock_Pct) +
+'</font></td>' +
+
+-- ✅ Network IO
+'<td align="Center"><font face="Verdana" size="1" color="' +
+    CASE 
+        WHEN Network_Pct > 15 THEN '#FF0000'
+        WHEN Network_Pct BETWEEN 5 AND 15 THEN '#FFD700'
+        ELSE '#40C211'
+    END + '">' +
+    CONVERT(VARCHAR(10), Network_Pct) +
+'</font></td>' +
+
+-- Overall Status
+'<td align="Center" style="font-weight:bold;"><font face="Verdana" size="1" color="' +
+CASE 
+    WHEN CPU_Pct > 40
+      OR IO_Data_Pct > 40
+      OR IO_Log_Pct >= 20
+      OR Lock_Pct >= 10
+      OR Network_Pct > 15
+        THEN '#FF0000'
+
+    WHEN CPU_Pct BETWEEN 20 AND 40
+      OR IO_Data_Pct BETWEEN 25 AND 40
+      OR Memory_Pct > 0
+      OR Network_Pct BETWEEN 5 AND 15
+        THEN '#FFCC00'
+
+    ELSE '#40C211'
+END + '">' +
+
+CASE 
+    WHEN CPU_Pct > 40
+      OR IO_Data_Pct > 40
+      OR IO_Log_Pct >= 20
+      OR Lock_Pct >= 10
+      OR Network_Pct > 15
+        THEN 'ACTION'
+
+    WHEN CPU_Pct BETWEEN 20 AND 40
+      OR IO_Data_Pct BETWEEN 25 AND 40
+      OR Memory_Pct > 0
+      OR Network_Pct BETWEEN 5 AND 15
+        THEN 'WATCH'
+
+    ELSE 'OK'
+END +
+
+'</font></td>' +
+'</tr>'
+FROM #WaitStatsHourly;
+
+SELECT @TableHTML = @TableHTML + '</table>';
+
+
+
+/******** Long Running Transactions ********/
+
+-- ===== Always show heading =====
+SELECT @TableHTML = @TableHTML +
+'<p style="margin-top:5; margin-bottom:5">&nbsp;</p>
+<font face="Verdana" size="4">
+<b>Long Running Queries Summary in Last 24 Hours</b>
+</font>';
+
+IF EXISTS (SELECT 1 FROM #LongRunningSummary)
 BEGIN
-SELECT                                   
- @TableHTML = @TableHTML +                                   
- '</table>                          
- <p style="margin-top: 0; margin-bottom: 0">&nbsp;</p>                                  
- <font face="Verdana" size="4">Job Status</font><br><br>' +                                      
- '<table style="BORDER-COLLAPSE: collapse" borderColor="#111111" cellPadding="0" width="933" bgColor="#ffffff" borderColorLight="#000000" border="1">                                    
- <tr>                                    
- <th align="Center" width="430" bgColor="001F3D">                                    
- <font face="Verdana" size="1" color="#FFFFFF">Session_ID</font></th>   
- <th align="Center" width="430" bgColor="001F3D">                                     
- <font face="Verdana" size="1" color="#FFFFFF">Wait_Type</font></th>                                    
- <th align="Center" width="430" bgColor="001F3D">                                     
- <font face="Verdana" size="1" color="#FFFFFF">DatabaseName</font></th>                                    
- <th align="Center" width="430" bgColor="001F3D">                                    
- <font face="Verdana" size="1" color="#FFFFFF">Process Loged Time</font></th>                                    
- <th align="Center" width="430" bgColor="001F3D">                                     
- <font face="Verdana" size="1" color="#FFFFFF">Status</font></th>                                    
- <th align="Center" width="430" bgColor="001F3D">                                     
- <font face="Verdana" size="1" color="#FFFFFF">Transaction_Status</font></th>      
-  <th align="Center" width="430" bgColor="001F3D">                                     
- <font face="Verdana" size="1" color="#FFFFFF">HostName</font></th>    
-  <th align="left" width="146" bgColor="001F3D">                                    
- <font face="Verdana" size="1" color="#FFFFFF">JobName</font></th>    
-  <th align="Center" width="430" bgColor="001F3D">                                    
- <font face="Verdana" size="1" color="#FFFFFF">Command</font></th>    
-  <th align="Center" width="430" bgColor="001F3D">                                     
- <font face="Verdana" size="1" color="#FFFFFF">Domain</font></th>     
-   <th align="Center" width="430" bgColor="001F3D">                                     
- <font face="Verdana" size="1" color="#FFFFFF">LoginName</font></th>                                 
- </tr>'                                    
+    /* ===== Table Header ===== */
+    SELECT @TableHTML = @TableHTML +
+    '<table width="933" cellpadding="0" cellspacing="0" border="0">
+        <tr><td height="6">&nbsp;</td></tr>
+     </table>
+
+     <table id="AutoNumber1" style="BORDER-COLLAPSE: collapse"
+            borderColor="#111111" cellPadding="0"
+            width="933" border="1">
+        <tr>
+            <th align="Center" bgColor="001F3D"><font face="Verdana" size="1" color="#FFFFFF">SummaryDate</font></th>
+            <th align="Center" bgColor="001F3D"><font face="Verdana" size="1" color="#FFFFFF">&lt;5 Min</font></th>
+            <th align="Center" bgColor="001F3D"><font face="Verdana" size="1" color="#FFFFFF">5-10 Min</font></th>
+            <th align="Center" bgColor="001F3D"><font face="Verdana" size="1" color="#FFFFFF">10-25 Min</font></th>
+            <th align="Center" bgColor="001F3D"><font face="Verdana" size="1" color="#FFFFFF">&gt;25 Min</font></th>
+            <th align="Center" bgColor="001F3D"><font face="Verdana" size="1" color="#FFFFFF">Total Queries</font></th>
+        </tr>';
+
+    /* ===== Table Rows ===== */
+    SELECT @TableHTML = @TableHTML +
+    '<tr>
+        <td align="Center"><font face="Verdana" size="1">' + CONVERT(VARCHAR(19), SummaryDate, 120) + '</font></td>
+        <td align="Center"><font face="Verdana" size="1">' + CONVERT(VARCHAR(10), Less_5_Min) + '</font></td>
+        <td align="Center"><font face="Verdana" size="1">' + CONVERT(VARCHAR(10), Between_5_10_Min) + '</font></td>
+        <td align="Center"><font face="Verdana" size="1">' + CONVERT(VARCHAR(10), Between_10_25_Min) + '</font></td>
+        <td align="Center"><font face="Verdana" size="1">' + CONVERT(VARCHAR(10), Greater_25_Min) + '</font></td>
+        <td align="Center"><font face="Verdana" size="1">' + CONVERT(VARCHAR(10), TotalQueries) + '</font></td>
+     </tr>'
+    FROM #LongRunningSummary;
+
+    -- Close table
+    SELECT @TableHTML = @TableHTML + '</table>';
+END
+ELSE
+BEGIN
+    /* ===== No data message ===== */
+    SELECT @TableHTML = @TableHTML +
+    '<p style="margin-top:10px; margin-bottom:10px">
+        <font face="Verdana" size="3" color="#008000">
+            No Long Running queries found in the last 24 hours
+        </font>
+     </p>';
 END
 
-SELECT                                   
- @TableHTML = ISNULL(CONVERT(VARCHAR(MAX), @TableHTML), 'No Job Running') + '<tr><td align="Center><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), spid), '') +'</font></td>' +                                      
-'<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), lastwaittype),'') + '</font></td>' +                       
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), dbname),'') + '</font></td>' +                                  
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), login_time),'') +'</font></td>' +     
-  '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), status),'') +'</font></td>' +     
-   '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), opentran),'') +'</font></td>' +     
-    '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), hostname),'') +'</font></td>' +     
-     '<td align="Center"> <font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(500), JobName),'') +'</font></td>' +     
-      '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(200), command),'') +'</font></td>' +     
-        '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), domain),'') +'</font></td>' +     
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50),loginname ),'') + '</font></td></tr>'      
-FROM                                   
- #JobInfo  
 
- /** Wait Stats***/  
- SELECT                                   
- @TableHTML =  @TableHTML +                              
- '</table>                                  
- <p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>                                  
- <font face="Verdana" size="4">Wait Statistics </font>
-   <table width="933" cellpadding="0" cellspacing="0" border="0">
-    <tr><td height="6">&nbsp;</td></tr>
-</table>
- <table id="AutoNumber1" style="BORDER-COLLAPSE: collapse" borderColor="#111111" height="40" cellSpacing="0" cellPadding="0" width="933" border="1">                                  
-   <tr>                
- <th align="Center" width="300" bgColor="001F3D">                                    
- <font face="Verdana" size="1" color="#FFFFFF">WaitType</font></th>                              
-  <th align="Center" width="300" bgColor="001F3D">               
- <font face="Verdana" size="1" color="#FFFFFF">Total_Wait_S</font></th> 
- <th align="Center" width="300" bgColor="001F3D">               
- <font face="Verdana" size="1" color="#FFFFFF">Total_Signal_S</font></th>
- <th align="Center" width="300" bgColor="001F3D">               
- <font face="Verdana" size="1" color="#FFFFFF">Total_WaitCount</font></th> 
- <th align="Center" width="300" bgColor="001F3D">              
- <font face="Verdana" size="1" color="#FFFFFF">Avg_Wait_S</font></th>
-   </tr>'                                  
-SELECT      
- @TableHTML =  @TableHTML +                                       
- '<tr>                                    
- <td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  WaitType ), '')  +'</font></td>' +                                        
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  Total_Wait_S), 'NULL')  +'</font></td>' +    
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  Total_Signal_S), 'NULL')  +'</font></td>' +
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  Total_WaitCount), 'NULL')  +'</font></td>' +
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  Avg_Wait_S), 'NULL')  +'</font></td>' +
-  '</tr>'                                  
-FROM             
- #WaitStatsLast24Hrs  order by Total_Wait_S desc
-  
-  
-/** Long running Transactions***/  
- SELECT                                   
- @TableHTML =  @TableHTML +                              
- '</table>                                  
- <p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>                                  
- <font face="Verdana" size="4">Long Running Queries Report in Last 24 Hours</font>
-   <table width="933" cellpadding="0" cellspacing="0" border="0">
-    <tr><td height="6">&nbsp;</td></tr>
-</table>
- <table id="AutoNumber1" style="BORDER-COLLAPSE: collapse" borderColor="#111111" height="40" cellSpacing="0" cellPadding="0" width="933" border="1">                                  
-   <tr>    
- <th align="Center" width="300" bgColor="001F3D">                                    
- <font face="Verdana" size="1" color="#FFFFFF">SPID</font></th> 
- <th align="Center" width="300" bgColor="001F3D">                                    
- <font face="Verdana" size="1" color="#FFFFFF">StartTime</font></th>                              
-  <th align="Center" width="300" bgColor="001F3D">               
- <font face="Verdana" size="1" color="#FFFFFF">ElapsedTime</font></th> 
- <th align="Center" width="300" bgColor="001F3D">               
- <font face="Verdana" size="1" color="#FFFFFF">UserName</font></th>
- <th align="Center" width="300" bgColor="001F3D">               
- <font face="Verdana" size="1" color="#FFFFFF">ProgramName</font></th> 
- <th align="Center" width="300" bgColor="001F3D">              
- <font face="Verdana" size="1" color="#FFFFFF">DatabaseName</font></th>
- <th align="Center" width="300" bgColor="001F3D">              
- <font face="Verdana" size="1" color="#FFFFFF">ExecutingSQL</font></th> 
- <th align="Center" width="300" bgColor="001F3D">               
- <font face="Verdana" size="1" color="#FFFFFF">WaitType</font></th>
-  <th align="Center" width="300" bgColor="001F3D">               
- <font face="Verdana" size="1" color="#FFFFFF">StatementText</font></th>
-  <th align="Center" width="300" bgColor="001F3D">               
- <font face="Verdana" size="1" color="#FFFFFF">StoredProcedure</font></th>
-   </tr>'                                  
-SELECT      
- @TableHTML =  @TableHTML +                                       
- '<tr>    
- <td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  SPID), '')  +'</font></td>' +                                        
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(varchar, StartTime, 120), '')  +'</font></td>' +                                        
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  ElapsedTime), 'NULL')  +'</font></td>' +    
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  UserName), 'NULL')  +'</font></td>' +
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  ProgramName), 'NULL')  +'</font></td>' +
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  DatabaseName), 'NULL')  +'</font></td>' +
- '<td align="Left"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(max),  ExecutingSQL), 'NULL')  +'</font></td>' +
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  WaitType), 'NULL')  +'</font></td>' +
- '<td align="Left"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(Max),  StatementText), 'NULL')  +'</font></td>' +
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  StoredProcedure), 'NULL')  +'</font></td>' +
-  '</tr>'                                  
-FROM             
- #LongRunningQueries order by ElapsedTime desc
 
-  /** Blocking Information **/  
+ /** Head Blocking Information **/   						
+/**************** Blocking Information ****************/
+SELECT @TableHTML = @TableHTML +
+'<p style="margin-top: 5; margin-bottom: 5">&nbsp;</p>
+<font face="Verdana" size="4"><b>Blocked Queries Report in Last 24 Hours</b></font>';
 
-  						
-  SELECT                                   
- @TableHTML =  @TableHTML +                              
- '</table>                                  
- <p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>                                  
- <font face="Verdana" size="4">Blocking Queries Report in Last 24 Hours</font>
-   <table width="933" cellpadding="0" cellspacing="0" border="0">
-    <tr><td height="6">&nbsp;</td></tr>
-</table>
- <table id="AutoNumber1" style="BORDER-COLLAPSE: collapse" borderColor="#111111" height="40" cellSpacing="0" cellPadding="0" width="933" border="1">                                  
-   <tr>                
- <th align="Center" width="300" bgColor="001F3D">                                    
- <font face="Verdana" size="1" color="#FFFFFF">BlockedSessionID</font></th>                              
-  <th align="Center" width="300" bgColor="001F3D">               
- <font face="Verdana" size="1" color="#FFFFFF">StartTime</font></th> 
- <th align="Center" width="300" bgColor="001F3D">               
- <font face="Verdana" size="1" color="#FFFFFF">WaitingInMinutes</font></th>
- <th align="Center" width="300" bgColor="001F3D">               
- <font face="Verdana" size="1" color="#FFFFFF">WaitType</font></th> 
- <th align="Center" width="300" bgColor="001F3D">              
- <font face="Verdana" size="1" color="#FFFFFF">BlockingSessionID</font></th>
- <th align="Center" width="300" bgColor="001F3D">              
- <font face="Verdana" size="1" color="#FFFFFF">QueryWaiting</font></th>
-   </tr>'                                  
-SELECT      
- @TableHTML =  @TableHTML +                                       
- '<tr>                                    
- <td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  BlockedSessionID ), '')  +'</font></td>' +                                        
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  StartTime), 'NULL')  +'</font></td>' +    
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  WaitingInMinutes), 'NULL')  +'</font></td>' +
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  WaitType), 'NULL')  +'</font></td>' +
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(max),  BlockingSessionID), 'NULL')  +'</font></td>' +
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  QueryWaiting), 'NULL')  +'</font></td>' +
-  '</tr>'                                  
-FROM             
- #BlockedQueriesLast24Hrs order by WaitingInMinutes desc				
+IF EXISTS (SELECT 1 FROM #HeadBlockerSummary)
+BEGIN
+    /* ===== Table Header ===== */
+    SELECT @TableHTML = @TableHTML +
+    '<table width="933" cellpadding="0" cellspacing="0" border="0">
+        <tr><td height="6">&nbsp;</td></tr>
+     </table>
+
+     <table id="AutoNumber1" style="BORDER-COLLAPSE: collapse"
+            borderColor="#111111" cellPadding="3"
+            width="933" border="1">
+        <tr>
+            <th bgColor="001F3D"><font face="Verdana" size="1" color="#FFFFFF">Head Blocker SPID</font></th>
+            <th bgColor="001F3D"><font face="Verdana" size="1" color="#FFFFFF">Head Blocker Query</font></th>
+            <th bgColor="001F3D"><font face="Verdana" size="1" color="#FFFFFF">Blocked Count</font></th>
+            <th bgColor="001F3D"><font face="Verdana" size="1" color="#FFFFFF">Duration (HH:MM:SS)</font></th>
+            <th bgColor="001F3D"><font face="Verdana" size="1" color="#FFFFFF">Duration (Minutes)</font></th>
+            <th bgColor="001F3D"><font face="Verdana" size="1" color="#FFFFFF">Log Date</font></th>
+            <th bgColor="001F3D"><font face="Verdana" size="1" color="#FFFFFF">Status</font></th>
+        </tr>';
+
+    /* ===== Table Rows ===== */
+    SELECT
+        @TableHTML = @TableHTML +
+        '<tr>
+            <td align="center"><font face="Verdana" size="1">' +
+                ISNULL(CONVERT(VARCHAR(10), head_blocker_session_id), '') + '</font></td>
+
+            <td><font face="Verdana" size="1">' +
+                ISNULL(head_blocker_query, '') + '</font></td>
+
+            <td align="center"><font face="Verdana" size="1">' +
+                ISNULL(CONVERT(VARCHAR(10), blocking_queries_count), '') + '</font></td>
+
+            <td align="center"><font face="Verdana" size="1">' +
+                ISNULL(BlockingDuration_HHMMSS, '') + '</font></td>
+
+            <td align="center"><font face="Verdana" size="1">' +
+                ISNULL(CONVERT(VARCHAR(10), BlockingDuration_Minutes), '') + '</font></td>
+
+            <td align="center"><font face="Verdana" size="1">' +
+                ISNULL(CONVERT(VARCHAR(19), logdate, 120), '') + '</font></td>
+
+            <td align="center" style="font-weight:bold;">
+                <font face="Verdana" size="1" color="' +
+
+                CASE Status
+                    WHEN 'ACTION REQUIRED' THEN '#FF0000'
+                    WHEN 'WATCH'         THEN '#FFCC00'
+                    WHEN 'OK'             THEN  '#008000'
+                    ELSE '#000000'
+                END +
+
+                '">' + Status + '</font>
+            </td>
+        </tr>'
+    FROM #HeadBlockerSummary
+    ORDER BY logdate DESC;
+-- CLOSE THE TABLE HERE
+SELECT @TableHTML = @TableHTML + '</table>';
+
+END
+ELSE
+BEGIN
+    /* ===== No data message ===== */
+    SELECT @TableHTML = @TableHTML +
+    '<p style="margin-top:10px; margin-bottom:10px">
+        <font face="Verdana" size="3" color="#008000">
+            No Head Blocker queries found in the last 24 hours
+        </font>
+     </p>';
+END
+-- CLOSE THE TABLE HERE
+SELECT @TableHTML = @TableHTML + '</table>';
+
+
+
+		
  
  /** Error Log Report Last 24 Hours***/  
- SELECT                                   
- @TableHTML =  @TableHTML +                              
- '</table>                                  
- <p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>                                  
- <font face="Verdana" size="4">Error Log Report in Last 24 Hours</font>
-   <table width="933" cellpadding="0" cellspacing="0" border="0">
-    <tr><td height="6">&nbsp;</td></tr>
-</table>
- <table id="AutoNumber1" style="BORDER-COLLAPSE: collapse" borderColor="#111111" height="40" cellSpacing="0" cellPadding="0" width="933" border="1">                                  
-   <tr>    
- <th align="Center" width="300" bgColor="001F3D">                                    
- <font face="Verdana" size="1" color="#FFFFFF">ErrorMessage</font></th> 
- <th align="Center" width="300" bgColor="001F3D">                                    
- <font face="Verdana" size="1" color="#FFFFFF">ErrorCount</font></th>                              
-  <th align="Center" width="300" bgColor="001F3D">               
- <font face="Verdana" size="1" color="#FFFFFF">FirstOccurrence</font></th> 
- <th align="Center" width="300" bgColor="001F3D">               
- <font face="Verdana" size="1" color="#FFFFFF">LastOccurrence</font></th>
-   </tr>'                                  
-SELECT      
- @TableHTML =  @TableHTML +                                       
- '<tr>    
- <td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(MAX),  ErrorMessage), '')  +'</font></td>' +  
-  '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  ErrorCount), 'NULL')  +'</font></td>' + 
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(varchar, FirstOccurrence, 120), '')  +'</font></td>' +  
- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(varchar, LastOccurrence, 120), '')  +'</font></td>' + 
+-- SELECT                                   
+-- @TableHTML =  @TableHTML +                              
+-- '</table>                                  
+-- <p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>                                  
+-- <font face="Verdana" size="4">Error Log Report in Last 24 Hours</font>
+--   <table width="933" cellpadding="0" cellspacing="0" border="0">
+--    <tr><td height="6">&nbsp;</td></tr>
+--</table>
+-- <table id="AutoNumber1" style="BORDER-COLLAPSE: collapse" borderColor="#111111" height="40" cellSpacing="0" cellPadding="0" width="933" border="1">                                  
+--   <tr>    
+-- <th align="Center" width="300" bgColor="001F3D">                                    
+-- <font face="Verdana" size="1" color="#FFFFFF">ErrorMessage</font></th> 
+-- <th align="Center" width="300" bgColor="001F3D">                                    
+-- <font face="Verdana" size="1" color="#FFFFFF">ErrorCount</font></th>                              
+--  <th align="Center" width="300" bgColor="001F3D">               
+-- <font face="Verdana" size="1" color="#FFFFFF">FirstOccurrence</font></th> 
+-- <th align="Center" width="300" bgColor="001F3D">               
+-- <font face="Verdana" size="1" color="#FFFFFF">LastOccurrence</font></th>
+--   </tr>'                                  
+--SELECT      
+-- @TableHTML =  @TableHTML +                                       
+-- '<tr>    
+-- <td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(MAX),  ErrorMessage), '')  +'</font></td>' +  
+--  '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100),  ErrorCount), 'NULL')  +'</font></td>' + 
+-- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(varchar, FirstOccurrence, 120), '')  +'</font></td>' +  
+-- '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(varchar, LastOccurrence, 120), '')  +'</font></td>' + 
    
-  '</tr>'                                  
-FROM             
- #ErrorLogSummary order by ErrorCount desc
+--  '</tr>'                                  
+--FROM             
+-- #ErrorLogSummary order by ErrorCount desc
+
+SET @TableHTML = @TableHTML +
+'<br><br>
+<font face="Verdana" size="2">
+Thanks &amp; Regards,<br>
+SQL Server<br>
+' + @SERVERNAME + ' 
+</font>';
 
 
 
@@ -1851,26 +1796,26 @@ EXEC msdb.dbo.sp_send_dbmail
  @body_format = 'HTML' ;                               
   
   
-DROP TABLE  #RebootDetails  
---DROP TABLE  #ErrorLogInfo  
-DROP TABLE  #CPU  
-DROP TABLE  #Memory_BPool;  
-DROP TABLE  #Memory_sys;  
-DROP TABLE  #Memory_process;  
-DROP TABLE  #Memory;  
-DROP TABLE  #perfmon_counters;  
-DROP TABLE  #PerfCntr_Data;  
-DROP TABLE  #Backup_Report;  
-DROP TABLE  #JobInfo;  
+DROP TABLE  #RebootDetails;    
+DROP TABLE  #CPU; 
+DROP TABLE #PLE;
+DROP TABLE  #Backup_Report;   
 DROP TABLE  #tempdbfileusage; 
 DROP TABLE  #UserDBFileUsage;
-DROP TABLE  #Failed_jobs;
-Drop TABLE #LongRunningQueries;
+DROP TABLE  #JobFailureSummary;
+Drop TABLE #LongRunningSummary;
+Drop TABLE #HeadBlockerSummary
+Drop TABLE #driveinfo;
+Drop TABLE #output;
+DROP TABLE #WaitStatsHourly;
   
 SET NOCOUNT OFF;  
 SET ARITHABORT OFF;  
 END  
  
+
+GO
+
 
 DECLARE @RC int
 DECLARE @MailProfile nvarchar(200)
@@ -1879,8 +1824,9 @@ DECLARE @Server varchar(100)
  
 -- TODO: Set parameter values here.
  
-EXECUTE @RC = [DBADB].[dbo].[SQLhealthcheck_report_new1]
+EXECUTE @RC = [DBADB].[dbo].[SQLhealthcheck_report_new2]
  'DBA'
-,'mssqltechsupport@geopits.com'
+,'aruneswaran@geopits.com;'--nareshkumar.s@geopits.com --mssqltechsupport@geopits.com
 ,'EC2AMAZ-IC6PG05'
+,'Retail Scan'
 GO
