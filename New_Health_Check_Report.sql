@@ -32,6 +32,7 @@ GO
 --   Failed Jobs in Last 24Hrs
 --   Long Running Queries Summary
 --	 Blocked Queries Summary
+-- Index Maintenance Summary
 
 /**************************/  
 /**************************/  
@@ -891,7 +892,51 @@ SELECT
 FROM DedupHeadBlockers
 WHERE rn = 1;
 
+/*********************/  
+/****** Index  Maintenance *********/  
+/*********************/  
 
+IF OBJECT_ID('tempdb..#HealthCheck_IndexMaintenance') IS NOT NULL
+    DROP TABLE #HealthCheck_IndexMaintenance;
+
+CREATE TABLE #HealthCheck_IndexMaintenance
+(
+    HealthCheckItem VARCHAR(100),
+    Status          VARCHAR(20),
+    FirstRunTime    VARCHAR(20),
+    LastRunTime     VARCHAR(20)
+);
+INSERT INTO #HealthCheck_IndexMaintenance
+(
+    HealthCheckItem,
+    Status,
+    FirstRunTime,
+    LastRunTime
+)
+SELECT
+    'ALTER_INDEX' AS HealthCheckItem,
+    CASE 
+        WHEN COUNT(*) > 0 THEN 'DONE'
+        ELSE 'NOT DONE'
+    END AS Status,
+    MIN(StartTime) AS FirstRunTime,
+    MAX(EndTime)   AS LastRunTime
+FROM DBADB.dbo.CommandLog 
+WHERE CommandType = 'ALTER_INDEX'
+  AND StartTime >= DATEADD(HOUR, -24, GETDATE());
+INSERT INTO #HealthCheck_IndexMaintenance
+SELECT
+    'UPDATE_STATISTICS' AS HealthCheckItem,
+    CASE 
+        WHEN COUNT(*) > 0 THEN 'DONE'
+        ELSE 'NOT DONE'
+    END AS Status,
+    MIN(StartTime) AS FirstRunTime,
+    MAX(EndTime)   AS LastRunTime
+FROM DBADB.dbo.CommandLog 
+WHERE CommandType = 'UPDATE_STATISTICS'
+  AND StartTime >= DATEADD(HOUR, -24, GETDATE());  
+  --cast(StartTime as date) = '2026-01-13' 
 
 /*********************/  
 /****** HTML Preparation *********/  
@@ -1741,6 +1786,40 @@ END
 -- CLOSE THE TABLE HERE
 SELECT @TableHTML = @TableHTML + '</table>';
 
+/**Index Maintenance in Last 24Hrs****/
+ IF EXISTS (SELECT 1 FROM #HealthCheck_IndexMaintenance)
+BEGIN
+
+SELECT                                   
+ @TableHTML = @TableHTML +                                   
+ '</table>                          
+ <p style="margin-top: 0; margin-bottom: 0">&nbsp;</p>                                  
+ <font face="Verdana" size="4"><b>Index Maintenance in Last 24Hrs</b></font><br><br>' +
+   
+ '<table style="BORDER-COLLAPSE: collapse" borderColor="#111111" cellPadding="0" width="1500" bgColor="#ffffff" borderColorLight="#000000" border="1"> 
+ 
+ <tr>                                    
+ <th align="Center" width="300" bgColor="001F3D">                                    
+ <font face="Verdana" size="1" color="#FFFFFF">Category</font></th>   
+ <th align="Center" width="300" bgColor="001F3D">                                   
+ <font face="Verdana" size="1" color="#FFFFFF">Status</font></th>                                    
+ <th align="Center" width="300" bgColor="001F3D">                                    
+ <font face="Verdana" size="1" color="#FFFFFF">Start Time</font></th>                                   
+ <th align="Center" width="300" bgColor="001F3D">                                  
+ <font face="Verdana" size="1" color="#FFFFFF">End Time</font></th>    
+ </tr>'                                    
+END
+
+SELECT                                   
+ @TableHTML = @TableHTML +                                      
+'<tr><td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), HealthCheckItem),'') + '</font></td>' +                       
+ '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(10), Status),'') + '</font></td>' +                                  
+ '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), FirstRunTime),'NOT OCCURED') +'</font></td>' +  
+  '<td align="Center"><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), LastRunTime),'NOT OCCURED') +'</font></td></tr>'      
+FROM #HealthCheck_IndexMaintenance
+
+
+SELECT @TableHTML = @TableHTML + '</table>';
 
 
 		
@@ -1825,8 +1904,8 @@ DECLARE @Server varchar(100)
 -- TODO: Set parameter values here.
  
 EXECUTE @RC = [DBADB].[dbo].[SQLhealthcheck_report_new2]
- 'DBA'
-,'aruneswaran@geopits.com;'--nareshkumar.s@geopits.com --mssqltechsupport@geopits.com
-,'EC2AMAZ-IC6PG05'
-,'Retail Scan'
+ 'DBA' -- DBMAIL 
+,'' -- recepients
+,'EC2AMAZ-IC6PG05' -- servername
+,'' -- client Name
 GO
