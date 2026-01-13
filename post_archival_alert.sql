@@ -1,11 +1,12 @@
 USE [DBADB]
 GO
-/****** Object:  StoredProcedure [dbo].[usp_SendArchivalPostAlert]    Script Date: 13-01-2026 16:59:45 ******/
+
 SET ANSI_NULLS ON
 GO
 SET QUOTED_IDENTIFIER ON
 GO
-ALTER   PROCEDURE [dbo].[usp_SendArchivalPostAlert]
+
+ALTER PROCEDURE [dbo].[usp_SendArchivalPostAlert]
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -16,12 +17,30 @@ BEGIN
         @DBName SYSNAME = 'AdventureWorks2022';
 
     ---------------------------------------------------------
+    -- 0. SEND ALERT ONLY IF RECORDS EXIST FOR TODAY
+    ---------------------------------------------------------
+    IF NOT EXISTS
+    (
+       SELECT 1
+        FROM DBADB.dbo.TBL_RETENTION_MASTER
+        WHERE CAST(LastUpdated AS DATE) = '2025-11-19'
+          AND ISNULL([Rows], 0) > 0
+
+
+		  
+    )
+    BEGIN
+        PRINT 'No archival records found for today. Email not sent.';
+        RETURN;
+    END
+
+    ---------------------------------------------------------
     -- 1. Set Email Subject
     ---------------------------------------------------------
     SET @MailSubject = @DBName + ' – Post-Archival Summary Report';
 
     ---------------------------------------------------------
-    -- 2. Build HTML Header (SAME COLOR FORMAT AS PRE-ARCHIVAL)
+    -- 2. Build HTML Header
     ---------------------------------------------------------
     SET @HTML = N'
     <h2 style="color:#1F618D;">Post-Archival Summary Report</h2>
@@ -39,14 +58,13 @@ BEGIN
         </tr>';
 
     ---------------------------------------------------------
-    -- 3. Read values from TBL_RETENTION_MASTER
+    -- 3. Cursor Declaration
     ---------------------------------------------------------
     DECLARE 
         @SourceTable NVARCHAR(200),
         @DestTable NVARCHAR(200),
         @Filter NVARCHAR(MAX),
         @Rows BIGINT,
-        @Status VARCHAR(50),
         @LastUpdated DATETIME,
         @Index INT = 1;
 
@@ -58,7 +76,8 @@ BEGIN
         [Rows],
         LastUpdated
     FROM DBADB.dbo.TBL_RETENTION_MASTER
-    WHERE CAST(LastUpdated AS DATE) = CAST(GETDATE() AS DATE)
+    WHERE CAST(LastUpdated AS DATE) = '2025-11-19'
+          AND ISNULL([Rows], 0) > 0
     ORDER BY LastUpdated DESC;
 
     OPEN cur;
@@ -66,7 +85,7 @@ BEGIN
         INTO @SourceTable, @DestTable, @Filter, @Rows, @LastUpdated;
 
     ---------------------------------------------------------
-    -- 4. Loop & Append Rows (SAME COLOR FORMAT)
+    -- 4. Loop & Append Rows
     ---------------------------------------------------------
     WHILE @@FETCH_STATUS = 0
     BEGIN
@@ -79,7 +98,7 @@ BEGIN
             <td>' + @SourceTable + '</td>
             <td>' + @DestTable + '</td>
             <td>' + ISNULL(@Filter, 'No Filter') + '</td>
-            <td>' + CAST(ISNULL(@Rows, 0) AS NVARCHAR(20)) + '</td>
+            <td>' + CAST(@Rows AS NVARCHAR(20)) + '</td>
             <td>' + CONVERT(VARCHAR(19), @LastUpdated, 120) + '</td>
         </tr>';
 
@@ -99,16 +118,13 @@ BEGIN
     ---------------------------------------------------------
     EXEC msdb.dbo.sp_send_dbmail
         @profile_name = 'SQL_Training',
-        @recipients = 'aruneswaran@geopits.com',
-        @subject = @MailSubject,
-        @body = @HTML,
-        @body_format = 'HTML';
+        @recipients   = 'aruneswaran@geopits.com',
+        @subject      = @MailSubject,
+        @body         = @HTML,
+        @body_format  = 'HTML';
 
-    PRINT 'Post-Archival summary email sent.';
-END;
-
-
-USE msdb;
+    PRINT 'Post-Archival summary email sent successfully.';
+END
 GO
 
 -- Replace 'YourJobName' with the exact name of your job
