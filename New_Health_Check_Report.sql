@@ -233,74 +233,80 @@ FROM PLEData;
 /****************************************************
  AG Status Report
 ****************************************************/
---IF OBJECT_ID('tempdb..#AG_DB_Status') IS NOT NULL
---    DROP TABLE #AG_DB_Status;
+IF OBJECT_ID('tempdb..#AG_DB_Status') IS NOT NULL
+    DROP TABLE #AG_DB_Status;
 
---CREATE TABLE #AG_DB_Status
---(
---    AG_Name                     SYSNAME,
---    DatabaseName                SYSNAME,
---    PrimaryServer               SYSNAME,
---    SecondaryServer             SYSNAME,
---    AvailabilityMode            VARCHAR(50),
---    FailoverMode                VARCHAR(50),
---    SynchronizationState        VARCHAR(50),
---    SynchronizationHealth       VARCHAR(50),
---    SuspendReason               VARCHAR(100),
---    LogSendQueue_KB             BIGINT,
---    LogSendRate_KB_per_sec      BIGINT,
---    RedoQueue_KB                BIGINT,
---    RedoRate_KB_per_sec         BIGINT,
---    SecondaryLag_Seconds        BIGINT
---);
+CREATE TABLE #AG_DB_Status
+(
+    AG_Name                     SYSNAME,
+    DatabaseName                SYSNAME,
+    PrimaryServer               SYSNAME,
+    SecondaryServer             SYSNAME NULL,
+    AvailabilityMode            VARCHAR(50),
+    FailoverMode                VARCHAR(50),
+    SynchronizationState        VARCHAR(50),
+    SynchronizationHealth       VARCHAR(50),
+    SuspendReason               VARCHAR(100),
+    LogSendQueue_KB             BIGINT,
+    LogSendRate_KB_per_sec      BIGINT,
+    RedoQueue_KB                BIGINT,
+    RedoRate_KB_per_sec         BIGINT,
+    SecondaryLag_Seconds        BIGINT
+);
 
---INSERT INTO #AG_DB_Status
---(
---    AG_Name,
---    DatabaseName,
---    PrimaryServer,
---    SecondaryServer,
---    AvailabilityMode,
---    FailoverMode,
---    SynchronizationState,
---    SynchronizationHealth,
---    SuspendReason,
---    LogSendQueue_KB,
---    LogSendRate_KB_per_sec,
---    RedoQueue_KB,
---    RedoRate_KB_per_sec,
---    SecondaryLag_Seconds
---)
---SELECT
---    ag.name                                         AS AG_Name,
---    adc.database_name                               AS DatabaseName,
---    pri.replica_server_name                         AS PrimaryServer,
---    sec.replica_server_name                         AS SecondaryServer,
---    ar.availability_mode_desc                       AS AvailabilityMode,
---    ar.failover_mode_desc                           AS FailoverMode,
---    drs.synchronization_state_desc                  AS SynchronizationState,
---    drs.synchronization_health_desc                 AS SynchronizationHealth,
---    drs.suspend_reason_desc                         AS SuspendReason,
---    drs.log_send_queue_size                         AS LogSendQueue_KB,
---    drs.log_send_rate                               AS LogSendRate_KB_per_sec,
---    drs.redo_queue_size                             AS RedoQueue_KB,
---    drs.redo_rate                                   AS RedoRate_KB_per_sec,
---    drs.secondary_lag_seconds                       AS SecondaryLag_Seconds
---FROM sys.availability_groups ag
---JOIN sys.availability_replicas ar
---    ON ag.group_id = ar.group_id
---JOIN sys.dm_hadr_database_replica_states drs
---    ON ar.replica_id = drs.replica_id
---JOIN sys.availability_databases_cluster adc
---    ON drs.group_database_id = adc.group_database_id
---LEFT JOIN sys.availability_replicas pri
---    ON ag.group_id = pri.group_id
---   AND pri.replica_id = drs.replica_id
---LEFT JOIN sys.availability_replicas sec
---    ON ag.group_id = sec.group_id
---   AND sec.replica_id = drs.replica_id
---   AND drs.is_primary_replica = 0;
+INSERT INTO #AG_DB_Status
+(
+    AG_Name,
+    DatabaseName,
+    PrimaryServer,
+    SecondaryServer,
+    AvailabilityMode,
+    FailoverMode,
+    SynchronizationState,
+    SynchronizationHealth,
+    SuspendReason,
+    LogSendQueue_KB,
+    LogSendRate_KB_per_sec,
+    RedoQueue_KB,
+    RedoRate_KB_per_sec,
+    SecondaryLag_Seconds
+)
+SELECT
+    ag.name                                   AS AG_Name,
+    adc.database_name                         AS DatabaseName,
 
+    -- Always correct, regardless of node
+    ags.primary_replica                      AS PrimaryServer,
+    ar.replica_server_name                   AS SecondaryServer,
+
+    ar.availability_mode_desc                AS AvailabilityMode,
+    ar.failover_mode_desc                    AS FailoverMode,
+
+    drs.synchronization_state_desc           AS SynchronizationState,
+    drs.synchronization_health_desc          AS SynchronizationHealth,
+    drs.suspend_reason_desc                  AS SuspendReason,
+
+    drs.log_send_queue_size                  AS LogSendQueue_KB,
+    drs.log_send_rate                        AS LogSendRate_KB_per_sec,
+    drs.redo_queue_size                      AS RedoQueue_KB,
+    drs.redo_rate                            AS RedoRate_KB_per_sec,
+    drs.secondary_lag_seconds                AS SecondaryLag_Seconds
+
+FROM sys.availability_groups ag
+
+JOIN sys.dm_hadr_availability_group_states ags
+    ON ag.group_id = ags.group_id
+
+JOIN sys.availability_replicas ar
+    ON ag.group_id = ar.group_id
+
+JOIN sys.dm_hadr_database_replica_states drs
+    ON ar.replica_id = drs.replica_id
+
+JOIN sys.availability_databases_cluster adc
+    ON drs.group_database_id = adc.group_database_id
+
+WHERE drs.is_primary_replica = 0;   -- show only secondary rows
 
 /****************************************************
  Log Shipping Report
