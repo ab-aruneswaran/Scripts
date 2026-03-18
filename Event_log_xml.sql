@@ -196,3 +196,9 @@ Step1: exec usp_Send_ErrorLogs_Email
 Step2: exec usp_Send_EventLogs_Email
 Step 3: exec usp_Send_AgentJobLogs_Email
 Job Shedule: every one hour - dail
+
+
+CAST(
+    STUFF(STUFF(CAST(h.run_date AS VARCHAR(8)), 5, 0, '-'), 8, 0, '-') + ' ' +
+    STUFF(STUFF(RIGHT('000000' + CAST(h.run_time AS VARCHAR(6)), 6), 3, 0, ':'), 6, 0, ':')
+AS DATETIME)
