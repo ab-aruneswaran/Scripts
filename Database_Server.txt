@@ -1,0 +1,79 @@
+$LogFile = "C:\DBMonitoring\DBMonitor.log"
+$ServerName = "MARSPRODDB-01"
+
+# Replace with your instance name
+$SQLServiceName = "MSSQL$PRODDB"
+$AgentServiceName = "SQLAgent$PRODDB"
+
+$FromEmail = "ITops@credopay.com"
+$ToEmail = "mssqlalerts@geopits.com"
+$SMTPServer = "mail.credopay.com"
+
+$Time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+# Check Server Availability
+$ServerStatus = Test-Connection -ComputerName $ServerName -Count 2 -Quiet
+
+Add-Content $LogFile "$Time - Checking server: $ServerName"
+Add-Content $LogFile "$Time - Ping Status: $ServerStatus"
+
+if ($ServerStatus -eq $false)
+{
+    Add-Content $LogFile "$Time - STATUS: SERVER DOWN - Alert Mail Sent"
+
+    Send-MailMessage `
+        -From $FromEmail `
+        -To $ToEmail `
+        -Subject "ALERT - Database Server Down - $ServerName" `
+        -Body "Database Server $ServerName is DOWN. Please investigate." `
+        -SmtpServer $SMTPServer `
+        -Port 25
+}
+else
+{
+    Add-Content $LogFile "$Time - STATUS: SERVER UP"
+
+    # Check SQL Server Service
+    $SQLService = Get-Service -ComputerName $ServerName -Name $SQLServiceName
+
+    Add-Content $LogFile "$Time - SQL Service ($SQLServiceName) Status: $($SQLService.Status)"
+
+    if ($SQLService.Status -ne "Running")
+    {
+        Add-Content $LogFile "$Time - STATUS: SQL SERVER SERVICE DOWN - Alert Mail Sent"
+
+        Send-MailMessage `
+            -From $FromEmail `
+            -To $ToEmail `
+            -Subject "ALERT - SQL Server Service Down - $ServerName" `
+            -Body "$SQLServiceName service is stopped on $ServerName." `
+            -SmtpServer $SMTPServer `
+            -Port 25
+    }
+    else
+    {
+        Add-Content $LogFile "$Time - STATUS: SQL SERVER SERVICE UP - No Alert"
+    }
+
+    # Check SQL Agent Service
+    $AgentService = Get-Service -ComputerName $ServerName -Name $AgentServiceName
+
+    Add-Content $LogFile "$Time - SQL Agent Service ($AgentServiceName) Status: $($AgentService.Status)"
+
+    if ($AgentService.Status -ne "Running")
+    {
+        Add-Content $LogFile "$Time - STATUS: SQL AGENT SERVICE DOWN - Alert Mail Sent"
+
+        Send-MailMessage `
+            -From $FromEmail `
+            -To $ToEmail `
+            -Subject "ALERT - SQL Agent Service Down - $ServerName" `
+            -Body "$AgentServiceName service is stopped on $ServerName." `
+            -SmtpServer $SMTPServer `
+            -Port 25
+    }
+    else
+    {
+        Add-Content $LogFile "$Time - STATUS: SQL AGENT SERVICE UP - No Alert"
+    }
+}
