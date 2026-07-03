@@ -1,0 +1,256 @@
+USE DBADB
+GO
+
+IF OBJECT_ID('dbo.Archival_Config') IS NOT NULL
+    DROP TABLE dbo.Archival_Config
+GO
+
+CREATE TABLE dbo.Archival_Config
+(
+    ID INT IDENTITY(1,1) PRIMARY KEY,
+    Source_DB SYSNAME,
+    Source_Schema SYSNAME,
+    Source_Table SYSNAME,
+
+    Target_DB SYSNAME,
+    Target_Schema SYSNAME,
+    Target_Table SYSNAME,
+
+    Date_Column SYSNAME,
+
+    Retention_Type VARCHAR(10),      -- DAYS / MONTHS
+    Retention_Value INT,
+
+    IsActive BIT DEFAULT 1
+)
+GO
+
+INSERT INTO dbo.Archival_Config
+(
+    Source_DB,Source_Schema,Source_Table,
+    Target_DB,Target_Schema,Target_Table,
+    Date_Column,
+    Retention_Type,Retention_Value
+)
+VALUES
+('TREDSPRODDB','dbo','FCS_AUDIT_TRAIL',
+'TREDSPRODDB_ARCHIVAL','dbo','FCS_AUDIT_TRAIL_ARCHIVAL',
+'CREATED_ON','DAYS',15),
+
+('TREDSPRODDB','dbo','FCS_NOTIFICATION_SCHEDULER',
+'TREDSPRODDB_ARCHIVAL','dbo','FCS_NOTIFICATION_SCHEDULER_ARCHIVAL',
+'CREATED_ON','DAYS',15),
+
+('TREDSPRODDB','dbo','RCT_FACTORING_UNIT_BULK_DATA',
+'TREDSPRODDB_ARCHIVAL','dbo','RCT_FACTORING_UNIT_BULK_DATA_ARCHIVAL',
+'CREATED_ON','DAYS',15),
+
+('TREDSPRODDB','dbo','FCS_MAIL_SCHEDULER',
+'TREDSPRODDB_ARCHIVAL','dbo','FCS_MAIL_SCHEDULER_ARCHIVAL',
+'CREATED_ON','DAYS',15),
+
+('TREDSPRODDB','dbo','RCT_MON_INVOICE_STATUS',
+'TREDSPRODDB_ARCHIVAL','dbo','RCT_MON_INVOICE_STATUS_ARCHIVAL',
+'CREATED_ON','DAYS',15),
+
+('TREDSPRODDB','dbo','RCT_MON_INVOICE_APICALL_LOG',
+'TREDSPRODDB_ARCHIVAL','dbo','RCT_MON_INVOICE_APICALL_LOG_ARCHIVAL',
+'CREATED_ON','DAYS',15),
+
+('TREDSPRODDB','dbo','RCT_API_CALL_LOG',
+'TREDSPRODDB_ARCHIVAL','dbo','RCT_API_CALL_LOG_ARCHIVAL',
+'CREATED_ON','DAYS',15),
+
+('TREDSPRODDB','dbo','ISIP_MONETAGO_ISCF_API_LOG',
+'TREDSPRODDB_ARCHIVAL','dbo','ISIP_MONETAGO_ISCF_API_LOG_ARCHIVAL',
+'CREATED_ON','MONTHS',5),
+
+('TREDSPRODDB','dbo','ISIP_MONETAGO_ISCF_Transaction_LOG',
+'TREDSPRODDB_ARCHIVAL','dbo','ISIP_MONETAGO_ISCF_Transaction_LOG_ARCHIVAL',
+'CREATED_ON','MONTHS',3),
+
+('TREDSPRODDB','dbo','ISIP_MONETAGO_ISCF_Transaction_LOG_AUDIT',
+'TREDSPRODDB_ARCHIVAL','dbo','ISIP_MONETAGO_ISCF_Transaction_LOG_AUDIT_ARCHIVAL',
+'CREATED_ON','MONTHS',6),
+
+('TREDSPRODDB','dbo','RCT_MON_ISCF_REQUEST',
+'TREDSPRODDB_ARCHIVAL','dbo','RCT_MON_ISCF_REQUEST_ARCHIVAL',
+'CREATED_ON','MONTHS',3)
+GO
+
+
+IF OBJECT_ID('dbo.Monthly_Archival_Table_Details') IS NULL
+BEGIN
+    CREATE TABLE dbo.Monthly_Archival_Table_Details
+    (
+        ID INT IDENTITY(1,1) PRIMARY KEY,
+        Archival_Month DATE,
+        Activity_Date DATE,
+
+        Source_Table_Name VARCHAR(500),
+        Target_Table_Name VARCHAR(500),
+
+        From_Date DATETIME,
+        To_Date DATETIME,
+
+        Before_Archival_Target_Row_Count BIGINT,
+        After_Archival_Target_Row_Count BIGINT,
+        Archived_Rows BIGINT,
+
+        Report_Generated_On DATETIME DEFAULT GETDATE()
+    )
+END
+GO
+
+
+CREATE OR ALTER PROC dbo.usp_Generate_Monthly_Archival_Report
+(
+    @ActivityDate DATE
+)
+AS
+BEGIN
+
+SET NOCOUNT ON;
+
+DECLARE
+    @SourceDB SYSNAME,
+    @SourceSchema SYSNAME,
+    @SourceTable SYSNAME,
+    @TargetDB SYSNAME,
+    @TargetSchema SYSNAME,
+    @TargetTable SYSNAME,
+    @DateColumn SYSNAME,
+    @RetentionType VARCHAR(10),
+    @RetentionValue INT,
+
+    @FromDate DATETIME,
+    @ToDate DATETIME,
+    @BeforeCount BIGINT,
+    @ArchivedRows BIGINT,
+    @AfterCount BIGINT,
+
+    @SQL NVARCHAR(MAX)
+
+DECLARE Cur CURSOR FAST_FORWARD FOR
+SELECT
+    Source_DB,
+    Source_Schema,
+    Source_Table,
+    Target_DB,
+    Target_Schema,
+    Target_Table,
+    Date_Column,
+    Retention_Type,
+    Retention_Value
+FROM dbo.Archival_Config
+WHERE IsActive=1
+
+OPEN Cur
+
+FETCH NEXT FROM Cur INTO
+@SourceDB,@SourceSchema,@SourceTable,
+@TargetDB,@TargetSchema,@TargetTable,
+@DateColumn,@RetentionType,@RetentionValue
+
+WHILE @@FETCH_STATUS=0
+BEGIN
+
+    ---------------------------------------------------
+    -- From Date (Last Archived Date)
+    ---------------------------------------------------
+
+    SET @SQL='
+    SELECT @FromDate_OUT=MAX('+QUOTENAME(@DateColumn)+')
+    FROM '+QUOTENAME(@TargetDB)+'.'+QUOTENAME(@TargetSchema)+'.'+QUOTENAME(@TargetTable)
+
+    EXEC sp_executesql
+        @SQL,
+        N'@FromDate_OUT DATETIME OUTPUT',
+        @FromDate OUTPUT
+
+    ---------------------------------------------------
+    -- Calculate To Date
+    ---------------------------------------------------
+
+    IF @RetentionType='DAYS'
+        SET @ToDate=DATEADD(DAY,-@RetentionValue,@ActivityDate)
+    ELSE
+        SET @ToDate=DATEADD(MONTH,-@RetentionValue,@ActivityDate)
+
+    ---------------------------------------------------
+    -- Current Archival Table Count
+    ---------------------------------------------------
+
+    SET @SQL='
+    SELECT @Cnt=COUNT(*)
+    FROM '+QUOTENAME(@TargetDB)+'.'+QUOTENAME(@TargetSchema)+'.'+QUOTENAME(@TargetTable)
+
+    EXEC sp_executesql
+        @SQL,
+        N'@Cnt BIGINT OUTPUT',
+        @BeforeCount OUTPUT
+
+    ---------------------------------------------------
+    -- Rows To Archive
+    ---------------------------------------------------
+
+    SET @SQL='
+    SELECT @Rows=COUNT(*)
+    FROM '+QUOTENAME(@SourceDB)+'.'+QUOTENAME(@SourceSchema)+'.'+QUOTENAME(@SourceTable)+' WITH(NOLOCK)
+    WHERE '+QUOTENAME(@DateColumn)+' > @FromDate
+    AND '+QUOTENAME(@DateColumn)+' <= @ToDate'
+
+    EXEC sp_executesql
+        @SQL,
+        N'@FromDate DATETIME,@ToDate DATETIME,@Rows BIGINT OUTPUT',
+        @FromDate,
+        @ToDate,
+        @ArchivedRows OUTPUT
+
+    SET @ArchivedRows=ISNULL(@ArchivedRows,0)
+
+    SET @AfterCount=@BeforeCount+@ArchivedRows
+
+    ---------------------------------------------------
+    -- Insert Report
+    ---------------------------------------------------
+
+    INSERT INTO dbo.Monthly_Archival_Table_Details
+    (
+        Archival_Month,
+        Activity_Date,
+        Source_Table_Name,
+        Target_Table_Name,
+        From_Date,
+        To_Date,
+        Before_Archival_Target_Row_Count,
+        After_Archival_Target_Row_Count,
+        Archived_Rows
+    )
+    VALUES
+    (
+        DATEFROMPARTS(YEAR(@ActivityDate),MONTH(@ActivityDate),1),
+        @ActivityDate,
+
+        @SourceDB+'.'+@SourceSchema+'.'+@SourceTable,
+        @TargetDB+'.'+@TargetSchema+'.'+@TargetTable,
+
+        @FromDate,
+        @ToDate,
+
+        @BeforeCount,
+        @AfterCount,
+        @ArchivedRows
+    )
+
+    FETCH NEXT FROM Cur INTO
+    @SourceDB,@SourceSchema,@SourceTable,
+    @TargetDB,@TargetSchema,@TargetTable,
+    @DateColumn,@RetentionType,@RetentionValue
+END
+
+CLOSE Cur
+DEALLOCATE Cur
+
+END
+GO
