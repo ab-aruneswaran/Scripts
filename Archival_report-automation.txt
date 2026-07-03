@@ -254,3 +254,90 @@ DEALLOCATE Cur
 
 END
 GO
+
+
+CREATE OR ALTER PROCEDURE DBADB.dbo.usp_Send_Monthly_Archival_Report
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE
+        @Subject NVARCHAR(500),
+        @Body NVARCHAR(MAX),
+        @TableHTML NVARCHAR(MAX),
+        @ServerName SYSNAME,
+        @LatestActivityDate DATE;
+
+    SET @ServerName = @@SERVERNAME;
+
+    SELECT @LatestActivityDate = MAX(Activity_Date)
+    FROM DBADB.dbo.Monthly_Archival_Table_Details;
+
+    SET @Subject =
+        'Archival Row Count Report From PROD Instance (' +
+        @ServerName + ') - ' +
+        CONVERT(VARCHAR(10),@LatestActivityDate,120);
+
+    SET @TableHTML =
+    N'<table border="1" cellpadding="5" cellspacing="0" style="border-collapse:collapse;font-family:Calibri;font-size:11pt;">
+        <tr bgcolor="#D9EAD3">
+            <th>Archival Month</th>
+            <th>Activity Date</th>
+            <th>Source Table</th>
+            <th>Target Table</th>
+            <th>From Date</th>
+            <th>To Date</th>
+            <th>Before Archival Count</th>
+            <th>Archived Rows</th>
+            <th>After Archival Count</th>
+        </tr>';
+
+    SELECT
+        @TableHTML = @TableHTML +
+        '<tr>' +
+        '<td>' + ISNULL(CAST(Archival_Month AS VARCHAR(50)),'') + '</td>' +
+        '<td>' + CONVERT(VARCHAR(10),Activity_Date,120) + '</td>' +
+        '<td>' + Source_Table_Name + '</td>' +
+        '<td>' + Target_Table_Name + '</td>' +
+        '<td>' + CONVERT(VARCHAR(10),From_Date,120) + '</td>' +
+        '<td>' + CONVERT(VARCHAR(10),To_Date,120) + '</td>' +
+        '<td align="right">' + FORMAT(Before_Archival_Target_Row_Count,'N0') + '</td>' +
+        '<td align="right">' + FORMAT(Archived_Rows,'N0') + '</td>' +
+        '<td align="right">' + FORMAT(After_Archival_Target_Row_Count,'N0') + '</td>' +
+        '</tr>'
+    FROM DBADB.dbo.Monthly_Archival_Table_Details
+    WHERE Activity_Date = @LatestActivityDate
+    ORDER BY Source_Table_Name;
+
+    SET @TableHTML = @TableHTML + '</table>';
+
+    SET @Body =
+    '
+    <html>
+    <body style="font-family:Calibri;font-size:11pt;">
+        <p>Hello Team,</p>
+
+        <p>Please find below the Monthly Archival Row Count Report.</p>
+
+        <p>
+        <b>Server Name :</b> ' + @ServerName + '<br>
+        <b>Activity Date :</b> ' + CONVERT(VARCHAR(10),@LatestActivityDate,120) + '<br>
+        <b>Report Generated Time :</b> ' + CONVERT(VARCHAR(19),GETDATE(),120) + '
+        </p>
+
+        ' + @TableHTML + '
+
+        <br><br>
+        Thanks,<br>
+        SQL DBA Team
+    </body>
+    </html>';
+
+    EXEC msdb.dbo.sp_send_dbmail
+        @profile_name = 'DBA_Profile',
+        @recipients = 'dba_team@company.com',
+        @subject = @Subject,
+        @body = @Body,
+        @body_format = 'HTML';
+END
+GO
